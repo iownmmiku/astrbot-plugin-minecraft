@@ -170,6 +170,7 @@ class LocalServerManager:
         self.motd = motd
         self.java_path = java_path
         self.log_cb = log_cb or (lambda line: logger.info("[mc-server] %s", line))
+        self.java_manager = JavaManager()
 
         self.process: asyncio.subprocess.Process | None = None
         self.state = "stopped"  # stopped | downloading | starting | running | stopping
@@ -270,7 +271,20 @@ class LocalServerManager:
         self._write_eula()
         self._write_server_properties()
         if not self.java_path:
-            self.java_path = (await detect_java()) or "java"
+            try:
+                self.java_path = self.java_manager.find_suitable_java(self.version)
+                self.log_cb(f"自动选择 Java：{self.java_path}")
+            except ValueError as exc:
+                return f"Java 自动选择失败：{exc}"
+
+        # 校验 Java 版本是否满足 MC 要求
+        required_version = self.java_manager.get_java_requirement(self.version)
+        java_version = self.java_manager.get_java_version(self.java_path)
+        if required_version and java_version and java_version < required_version:
+            return (
+                f"Java {java_version} 不满足 MC {self.version} 的要求"
+                f"（需要 Java {required_version}+）"
+            )
         self.state = "starting"
         self._restart_on_exit = restart_on_exit
         self._stop_event = asyncio.Event()
