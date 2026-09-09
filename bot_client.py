@@ -39,6 +39,8 @@ PROTOCOL_VERSION = 763  # Minecraft 1.20.1
 
 # ---- clientbound play 包 ID（protocol 763）----
 CB_NAMED_ENTITY_SPAWN = 0x03
+CB_SET_CONTAINER_CONTENT = 0x11
+CB_SET_SLOT = 0x15
 CB_KEEP_ALIVE = 0x23
 CB_LOGIN = 0x28
 CB_REL_ENTITY_MOVE = 0x2B
@@ -70,9 +72,11 @@ SB_POSITION_LOOK = 0x15
 SB_LOOK = 0x16
 SB_FLYING = 0x17
 SB_BLOCK_DIG = 0x1D
+SB_BLOCK_PLACE = 0x31
 SB_PONG = 0x20
 SB_HELD_ITEM_SLOT = 0x28
 SB_ARM_ANIMATION = 0x2F
+SB_USE_ITEM = 0x32
 
 # 挖掘状态（PlayerDigging）
 DIG_START = 0
@@ -344,6 +348,32 @@ class SBTPong(PlayServerBoundPacket):
 
 @final
 @define
+class SBTUseItem(PlayServerBoundPacket):
+    """Use Item (0x32)：使用手持物品（吃食物、喝药水等）。"""
+    PACKET_ID = SB_USE_ITEM
+
+    hand: int  # 0=主手，1=副手
+    sequence: int = 0
+
+    def serialize_to(self, buf: Buffer) -> None:
+        buf.write_varint(self.hand)
+        buf.write_varint(self.sequence)
+
+
+@final
+@define
+class SBTHeldItemSlot(PlayServerBoundPacket):
+    """Held Item Change (0x28)：切换手持物品栏位（0-8）。"""
+    PACKET_ID = SB_HELD_ITEM_SLOT
+
+    slot: int  # 0-8
+
+    def serialize_to(self, buf: Buffer) -> None:
+        buf.write_value(StructFormat.SHORT, self.slot)
+
+
+@final
+@define
 class SBTBlockDig(PlayServerBoundPacket):
     """ServerBound Player Digging (1.20.1)：status / location(打包 position) / face / sequence"""
 
@@ -434,6 +464,11 @@ class MCBot:
         self.health = 20.0
         self.food = 20
         self.food_saturation = 5.0
+        
+        # 库存系统：slot_id -> {item_id, count, nbt}
+        # slot 0-8: 快捷栏，9-35: 主背包，36-39: 盔甲栏，40: 副手
+        self.inventory: dict[int, dict[str, Any]] = {}
+        self.held_slot = 0  # 当前手持物品栏位 (0-8)
 
         self.players: dict[str, str] = {}       # uuid -> 玩家名
         self.entities: dict[int, dict[str, Any]] = {}  # entityId -> {uuid, x, y, z}
@@ -622,6 +657,8 @@ class MCBot:
             CB_PLAYER_CHAT: self._on_player_chat,
             CB_PROFILELESS_CHAT: self._on_profileless_chat,
             CB_UPDATE_HEALTH: self._on_health,
+            CB_SET_CONTAINER_CONTENT: self._on_set_container_content,
+            CB_SET_SLOT: self._on_set_slot,
             CB_PLAYER_INFO: self._on_player_info,
             CB_PLAYER_REMOVE: self._on_player_remove,
             CB_NAMED_ENTITY_SPAWN: self._on_named_entity_spawn,
@@ -686,6 +723,53 @@ class MCBot:
         self.food = buf.read_varint()
         self.food_saturation = buf.read_value(StructFormat.FLOAT)
         await self._fire("on_health", self.health, self.food)
+
+    def _read_slot(self, buf: Buffer) -> dict[str, Any] | None:
+        """读取一个物品槽位数据（Slot 类型）。
+        
+        返回 None（空槽）或 {"item_id": int, "count": int, "nbt": bytes}
+        """
+        present = buf.read_value(StructFormat.BOOL)
+        if not present:
+            return None
+        item_id = buf.read_varint()
+        count = buf.read_value(StructFormat.BYTE)
+        nbt_bytes = buf.read_bytearray()  # NBT 数据（暂不解析）
+        return {"item_id": item_id, "count": count, "nbt": nbt_bytes}
+
+    async def _on_set_container_content(self, buf: Buffer) -> None:
+        """Set Container Content (0x11)：批量更新容器内容。
+        
+        window_id=0 是玩家自己的背包。
+        """
+        window_id = buf.read_value(StructFormat.UBYTE)
+        state_id = buf.read_varint()
+        count = buf.read_varint()
+        slots = []
+        for _ in range(count):
+            slot_data = self._read_slot(buf)
+            slots.append(slot_data)
+        carried_item = self._read_slot(buf)  # 鼠标拖动的物品
+        
+        if window_id == 0:  # 玩家背包
+            self.inventory.clear()
+            for i, slot_data in enumerate(slots):
+                if slot_data:
+                    self.inventory[i] = slot_data
+            logger.debug("库存已更新：%d 个非空槽位", len(self.inventory))
+
+    async def _on_set_slot(self, buf: Buffer) -> None:
+        """Set Slot (0x15)：单个槽位更新。"""
+        window_id = buf.read_value(StructFormat.BYTE)
+        state_id = buf.read_varint()
+        slot_id = buf.read_value(StructFormat.SHORT)
+        slot_data = self._read_slot(buf)
+        
+        if window_id == 0:  # 玩家背包
+            if slot_data:
+                self.inventory[slot_id] = slot_data
+            else:
+                self.inventory.pop(slot_id, None)
 
     async def _on_spawn_position(self, buf: Buffer) -> None:
         """接收出生点坐标（阶段 2 复合动作需要）"""
@@ -876,6 +960,72 @@ class MCBot:
         )
         return True
 
+    # ---------- 库存与物品 ----------
+    def has_item(self, item_id: int) -> bool:
+        """检查库存中是否有指定物品。"""
+        return any(slot["item_id"] == item_id for slot in self.inventory.values())
+
+    def count_item(self, item_id: int) -> int:
+        """统计库存中指定物品的数量。"""
+        return sum(slot["count"] for slot in self.inventory.values() if slot["item_id"] == item_id)
+
+    def find_food_slot(self) -> int | None:
+        """在快捷栏（0-8）找第一个食物，返回槽位 ID。
+        
+        常见食物 ID（1.20.1）：
+        - 面包 393, 苹果 397, 熟猪排 424, 熟牛肉 423
+        - 胡萝卜 427, 烤马铃薯 429, 曲奇 434
+        - 西瓜片 436, 熟鸡肉 424, 烤兔肉 531
+        """
+        food_ids = {393, 397, 424, 423, 427, 429, 434, 436, 531, 320, 322, 297, 350, 360, 366, 391, 400}
+        for slot_id in range(9):  # 只检查快捷栏
+            slot_data = self.inventory.get(slot_id)
+            if slot_data and slot_data["item_id"] in food_ids:
+                return slot_id
+        return None
+
+    async def use_item(self, hand: int = 0) -> bool:
+        """使用手持物品（吃食物、喝药水等）。
+        
+        Args:
+            hand: 0=主手，1=副手
+        
+        Returns:
+            True 如果成功发送使用指令
+        """
+        if not self.connected:
+            return False
+        await self._send(SBTUseItem(hand=hand, sequence=0))
+        return True
+
+    async def switch_held_slot(self, slot: int) -> bool:
+        """切换手持物品栏位（0-8）。"""
+        if not self.connected or not 0 <= slot <= 8:
+            return False
+        self.held_slot = slot
+        await self._send(SBTHeldItemSlot(slot=slot))
+        return True
+
+    async def eat_food(self) -> str | None:
+        """自动找食物并吃掉。成功返回 None，失败返回原因。"""
+        if not self.connected:
+            return "机器人未连接"
+        
+        food_slot = self.find_food_slot()
+        if food_slot is None:
+            return "快捷栏没有食物"
+        
+        # 切换到食物槽位
+        if self.held_slot != food_slot:
+            await self.switch_held_slot(food_slot)
+            await asyncio.sleep(0.1)
+        
+        # 使用物品（吃）
+        await self.use_item(hand=0)
+        logger.info("正在吃食物（槽位 %d）", food_slot)
+        return None
+
+    # ---------- 移动与视角 ----------
     async def look_at(self, yaw: float, pitch: float) -> None:
         if not self.connected or self.position is None:
             return

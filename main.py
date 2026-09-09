@@ -272,19 +272,63 @@ class MinecraftPlugin(Star):
         # 有人跟角色说话 → 心情上升（参考女仆好感）
         if self.bot and self.bot.behavior_manager:
             self.bot.behavior_manager.note_interaction()
-        # 游戏内 @机器人 或点名 → LLM 回复（可选）
+        # 游戏内唤醒词检测 → LLM 回复（可选）
         if self._cfg("auto_reply_in_game", True) and sender:
-            name = self._bot_username.lower()
-            if name in text.lower() or text.lstrip().startswith("@"):
+            if self._should_reply_to_message(text):
                 asyncio.create_task(self._in_game_llm_reply(sender, text))
+
+    def _should_reply_to_message(self, text: str) -> bool:
+        """检查消息是否包含唤醒词或 @ 机器人。"""
+        text_lower = text.lower()
+        
+        # 默认唤醒词：机器人名字
+        wake_words = self._cfg("mc_chat_wake_words", [])
+        if not wake_words:
+            wake_words = [self._bot_username.lower()]
+        
+        # 检查唤醒词
+        for word in wake_words:
+            if word.lower() in text_lower:
+                return True
+        
+        # 检查 @ 符号
+        if text.lstrip().startswith("@"):
+            return True
+        
+        return False
 
     async def _on_mc_disconnect(self, reason: str, kicked: bool) -> None:
         logger.warning("机器人断开：%s", reason)
         await self.bridge.broadcast(f"【MC】机器人已断开：{reason}")
 
     # ---------- LLM ----------
+    def _get_system_prompt(self) -> str:
+        """获取 AstrBot 配置的人格 system_prompt。"""
+        # 优先使用 AstrBot 全局人格配置
+        try:
+            provider = self.context.get_using_provider()
+            if provider and hasattr(provider, 'personality'):
+                personality = provider.personality
+                if personality:
+                    return personality
+        except Exception:  # noqa: BLE001
+            pass
+        
+        # 降级使用插件配置的自定义人格描述
+        custom_desc = self._cfg("persona_custom_desc", "")
+        if custom_desc:
+            return custom_desc
+        
+        # 最终降级使用插件内置人格（但尽量让 LLM 使用 AstrBot 配置）
+        persona = self._persona
+        return persona.system_prompt()
+
     async def _llm_chat(self, prompt: str, system_prompt: str | None = None) -> str | None:
         """统一 LLM 调用：支持指定模型（llm_model 配置）与人设 system_prompt。"""
+        # 如果没有指定 system_prompt，使用 AstrBot 的人格配置
+        if system_prompt is None:
+            system_prompt = self._get_system_prompt()
+        
         model = (self._cfg("llm_model", "") or "").strip() or None
         try:
             provider = self.context.get_using_provider()
@@ -312,6 +356,30 @@ class MinecraftPlugin(Star):
     async def _idle_llm(self, prompt: str) -> str | None:
         """空闲行为用的 LLM 通道（自动带人设与配置模型）。"""
         return await self._llm_chat(prompt)
+    
+    async def _llm_decide_action(self, context: str) -> str | None:
+        """让 LLM 为机器人的下一步行动做出决策。
+        
+        Args:
+            context: 当前情境描述（位置、饥饿度、库存、周围环境等）
+        
+        Returns:
+            LLM 建议的行动（如 "寻找食物"、"建造庇护所"、"探索附近"等）
+        """
+        prompt = f"""你是 Minecraft 世界中的一个 AI 玩家。
+
+当前状态：
+{context}
+
+请根据当前情况，决定接下来应该做什么。只需要简短描述你的计划（20字以内），例如：
+- "我需要找食物吃"
+- "该建个房子了"
+- "去附近探索看看"
+- "先收集一些木头"
+
+不要解释原因，只说你要做什么："""
+        
+        return await self._llm_chat(prompt)
 
     async def _idle_speak(self, text: str) -> None:
         """把角色的自主发言（小动作/自言自语）发到游戏内聊天 + 推送给订阅者。"""
@@ -327,20 +395,21 @@ class MinecraftPlugin(Star):
         await self.bridge.broadcast(f"【{self._bot_username}】{text}")
 
     async def _in_game_llm_reply(self, sender: str, text: str) -> None:
+        “””游戏内 LLM 回复（使用 AstrBot 的人格配置）。”””
         try:
-            persona = self._persona
             prompt = (
-                f"玩家 {sender} 在 Minecraft 世界里对你说：{text}\n"
-                f"请以「{self._bot_username}」的身份，用 {persona.self_ref} 的语气"
-                "简短回应（30 字以内），口语化，不要加引号和前缀。"
+                f”玩家 {sender} 在 Minecraft 世界里对你说：{text}\n”
+                f”请以「{self._bot_username}」的身份简短回应（30 字以内），”
+                “口语化，不要加引号和前缀。”
             )
-            reply = await self._llm_chat(prompt, system_prompt=persona.system_prompt())
+            # 使用 AstrBot 的 system_prompt，而不是插件内置人格
+            reply = await self._llm_chat(prompt)
             if reply and self.bot and self.bot.connected:
-                reply = reply.strip().strip('"“”')
+                reply = reply.strip().strip('”””')
                 await self.bot.send_chat(reply[:100])
-                await self.bridge.broadcast(f"【MC】{self._bot_username}：{reply[:100]}")
+                await self.bridge.broadcast(f”【MC】{self._bot_username}：{reply[:100]}”)
         except Exception:  # noqa: BLE001
-            logger.exception("游戏内 LLM 回复失败")
+            logger.exception(“游戏内 LLM 回复失败”)
 
     # ---------- 状态文本 ----------
     async def _status_text(self) -> str:

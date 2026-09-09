@@ -38,13 +38,19 @@ WebUI 插件配置页，关键项：
 | `local_port` / `local_motd` | 本地服端口 / MOTD | `25565` |
 | `java_path` | Java 路径（留空自动检测，需 Java 17+） | 空 |
 | `auto_connect` | 插件加载后自动起服 + 进服 | 开 |
-| `auto_reply_in_game` | 游戏内 @机器人 时用 LLM 回复 | 开 |
+| `auto_reply_in_game` | 游戏内聊天触发 LLM 回复（需包含唤醒词） | 开 |
+| `mc_chat_wake_words` | 游戏内聊天唤醒词列表（默认为机器人名字） | `[]` |
+| `persona_custom_desc` | 自定义人格描述（降级使用，优先使用 AstrBot Provider 人格） | 空 |
+| `llm_model` | LLM 模型名（留空使用 Provider 默认模型） | 空 |
 | `max_reconnect_times` | 断线自动重连次数（指数退避） | 5 |
 | `enable_action_queue` | 启用异步动作队列（LLM 工具立即返回） | 开 |
 | `enable_pathfinding` | 启用智能寻路（A* 绕障碍） | 开 |
 | `pathfinding_max_cost` | 寻路最大代价（超过改用直线） | 1000 |
-| `enable_autonomous_behaviors` | 启用自主行为（自动避险/进食） | 开 |
-| `auto_eat_threshold` | 自动进食饥饿值阈值 | 10 |
+| `enable_autonomous_behaviors` | 启用自主行为（自动避险） | 开 |
+| `enable_survival_behaviors` | 启用生存行为（自动进食） | 开 |
+| `survival_food_threshold` | 自动进食饥饿值阈值 | 14 |
+| `survival_food_cooldown` | 自动进食冷却时间（秒） | 10.0 |
+| `auto_eat_threshold` | (已弃用，使用 survival_food_threshold) | 10 |
 | `auto_flee_enabled` | 自动逃离接近的实体 | 关 |
 
 ### 3. 三种服务器模式
@@ -179,23 +185,28 @@ LLM：[调用 mc_collect_nearby(0, 64, 0, 5)] 已开始收集，预计需要 3 �
 
 ### 3. 自主行为系统
 
-**解决问题**：机器人只能被动响应指令，遇到危险（如怪物、掉落）无法自主避险。
+**解决问题**：机器人只能被动响应指令，遇到危险（如怪物、掉落）无法自主避险，无法真正「生存」。
 
 **优化方案**：
-- **自动进食**：饥饿值低于阈值时尝试使用食物（当前版本记录日志，未来扩展背包操作）
+- **自动进食**：饥饿值低于阈值时自动在快捷栏寻找食物并吃掉，成功后使用人格台词表达（如"吃饱啦！"）
 - **自动逃离**：检测到实体靠近时自动向反方向移动（默认关闭，避免干扰用户意图）
 - **行为优先级**：自主行为通过动作队列插队执行，但不会中断正在执行的用户指令
 
 **配置项**：
 - `enable_autonomous_behaviors`（默认开启）
-- `auto_eat_threshold`（饥饿值阈值，默认 10）
+- `enable_survival_behaviors`（生存行为开关，默认开启）
+- `survival_food_threshold`（饥饿值阈值，默认 14）
+- `survival_food_cooldown`（进食冷却时间，默认 10.0 秒）
 - `auto_flee_enabled`（自动逃离开关，默认关闭）
 
 **日志示例**：
 ```
-[INFO] [自主行为] 检测到饥饿（food=8 < 10），尝试自动进食
-[INFO] [自主行为] 检测到实体 (僵尸) 在 3.2 格内，触发逃离行为
+[INFO] 触发生存行为：饥饿度 12，准备吃食物
+[INFO] 正在吃食物（槽位 3）
+[MC] AstrBot：（摸了摸肚子，满足地笑了）嗯～吃饱啦，谢谢款待！
 ```
+
+**支持的食物**：面包、牛肉、猪肉、鸡肉、苹果、金苹果、胡萝卜、烤土豆、曲奇等常见食物（仅在快捷栏 0-8 槽位查找）
 
 ---
 
@@ -216,6 +227,46 @@ LLM：[调用 mc_collect_nearby(0, 64, 0, 5)] 已开始收集，预计需要 3 �
 **限制**：
 - 当前版本未加载服务器地形数据，寻路基于简化地图（假设地面平坦）
 - 未来版本可扩展：接收 Chunk Data 包后构建真实地形地图
+
+---
+
+### 5. AstrBot 人格与 LLM 集成 **NEW!**
+
+**解决问题**：插件内置的人格系统与 AstrBot 全局配置脱节，无法统一管理机器人的性格和语气；游戏内聊天机器人会回复每一条消息导致刷屏。
+
+**优化方案**：
+- **统一人格系统**：机器人的所有 LLM 回复（游戏内聊天、空闲台词）自动使用 AstrBot Provider 配置的全局人格
+- **人格降级链**：AstrBot Provider 人格 → 插件自定义人格描述 → 插件内置人格（仅用于预设台词模板）
+- **唤醒词机制**：游戏内聊天需包含唤醒词才触发 LLM 回复，避免对每条消息都响应
+
+**配置项**：
+- `mc_chat_wake_words`：唤醒词列表（默认为机器人名字），支持多个词
+- `auto_reply_in_game`：启用游戏内聊天 LLM 回复（默认开启）
+- `persona_custom_desc`：自定义人格描述（当 AstrBot Provider 未配置人格时使用）
+- `llm_model`：指定 LLM 模型名（留空使用 Provider 默认模型）
+
+**使用示例**：
+```json
+{
+  "mc_chat_wake_words": ["AstrBot", "机器人", "小助手"],
+  "persona_custom_desc": "你是一个活泼可爱的 Minecraft 玩家，喜欢探险和建造。"
+}
+```
+
+**游戏内对话**：
+```
+玩家: "今天天气真好"           ✗ 不回复（无唤醒词）
+玩家: "AstrBot 你在哪？"       ✓ 触发回复："我在坐标 (123, 64, 456) 呢！"
+玩家: "机器人过来帮忙"         ✓ 触发回复："好的，马上来！"
+玩家: "@有人在吗？"            ✓ 触发回复（@ 符号自动触发）
+```
+
+**人格配置步骤**：
+1. 在 AstrBot WebUI → LLM Provider 设置中配置全局人格（推荐）
+2. 或在插件配置中填写 `persona_custom_desc` 自定义人格描述
+3. 插件将自动使用配置的人格，无需重启
+
+详细说明请参考：[AstrBot 集成文档](docs/ASTRBOT_INTEGRATION.md)
 
 ---
 

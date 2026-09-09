@@ -344,6 +344,52 @@ class HungryReactionBehavior(Behavior):
         return None
 
 
+class SurvivalFoodBehavior(Behavior):
+    """生存行为：饥饿时自动吃食物（真正的 AI 玩家行为）。
+    
+    优先级高于空闲行为，低于紧急避险。当饥饿度低于阈值且库存有食物时，
+    自动切换槽位并吃掉食物。未来可扩展为：没有食物时主动寻找和收集。
+    """
+
+    def __init__(self, *, threshold: int = 14, cooldown: float = 10.0):
+        super().__init__(name="survival_food", priority=70, check_interval=5.0)
+        self.threshold = threshold  # 饥饿度低于此值时吃食物
+        self.cooldown = cooldown
+        self.last_eat = 0.0
+
+    async def should_trigger(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> bool:
+        if not bot.connected:
+            return False
+        if time.time() - self.last_eat < self.cooldown:
+            return False
+        # 饿了且有食物
+        if bot.food < self.threshold:
+            return bot.find_food_slot() is not None
+        return False
+
+    async def execute(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> str | None:
+        logger.info("触发生存行为：饥饿度 %d，准备吃食物", bot.food)
+        
+        # 尝试吃食物
+        err = await bot.eat_food()
+        if err:
+            logger.warning("吃食物失败：%s", err)
+            await manager.speak(f"（肚子咕咕叫）主人，{err}...")
+            return err
+        
+        # 成功吃掉，等待效果生效
+        await asyncio.sleep(1.5)
+        self.last_eat = time.time()
+        
+        # 吃完后的反应
+        if bot.food > self.threshold:
+            await manager.speak(manager.persona.pick_reaction("eat_success"))
+        else:
+            await manager.speak("（吃了点东西）嗯...还是有点饿呢")
+        
+        return None
+
+
 class AmbientWanderBehavior(Behavior):
     """空闲时小范围闲逛，让角色看起来「活着」（参考女仆 FindSit/Joy 的移动表现）。
 
@@ -420,6 +466,13 @@ class AutonomousBehaviorManager:
             self._behaviors.append(EatWhenHungryBehavior(threshold=cfg.get("auto_eat_threshold", 10)))
         if cfg.get("auto_flee_enabled", False):
             self._behaviors.append(FleeFromMobsBehavior())
+
+        # 生存行为（真正的 AI 玩家）
+        if cfg.get("enable_survival_behaviors", True):
+            self._behaviors.append(SurvivalFoodBehavior(
+                threshold=int(cfg.get("survival_food_threshold", 14)),
+                cooldown=float(cfg.get("survival_food_cooldown", 10.0)),
+            ))
 
         # 生动反应层
         if cfg.get("enable_idle_behaviors", True):

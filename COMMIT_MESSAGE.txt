@@ -1,0 +1,31 @@
+feat: 集成 AstrBot 人格系统和游戏内聊天唤醒词,实现自动进食生存行为
+
+## 主要变更
+
+### 1. AstrBot 人格与 LLM 系统集成
+- 统一使用 AstrBot Provider 的全局人格配置
+- 实现三级降级链:Provider 人格 -> 自定义人格描述 -> 内置人格
+- 新增 _get_system_prompt() 方法自动获取 AstrBot 人格
+- 修改 _llm_chat() 默认使用 AstrBot system_prompt
+- 新增配置项: persona_custom_desc、llm_model
+
+### 2. 游戏内聊天唤醒词机制
+- 新增 _should_reply_to_message() 方法检测唤醒词
+- 支持自定义唤醒词列表 (mc_chat_wake_words)
+- 默认唤醒词: 机器人用户名
+- 支持 @ 符号触发回复
+- 避免机器人对游戏内每条消息都回复导致刷屏
+
+### 3. 完善生存行为系统
+- 实现完整的库存系统: 解析 Set Container Content (0x11) 和 Set Slot (0x15)
+- 新增 find_food_slot() 方法在快捷栏查找食物
+- 新增 eat_food() 方法自动吃食物 (切换槽位 + Use Item)
+- 新增 SurvivalFoodBehavior 自主行为: 饥饿时自动进食
+- 为所有人格添加 eat_success 反应台词
+- 新增配置项: enable_survival_behaviors、survival_food_threshold、survival_food_cooldown
+
+### 4. 文档更新
+- 新增 docs/ASTRBOT_INTEGRATION.md 详细说明集成方案
+- 更新 README 配置表和功能说明
+- 添加唤醒词使用示例和配置说明
+- 更新自主行为章节说明真实的进食能力
