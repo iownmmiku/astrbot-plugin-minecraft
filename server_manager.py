@@ -23,6 +23,8 @@ from mcproto.packets.handshaking.handshake import Handshake, NextState
 from mcproto.packets.interactions import async_read_packet, async_write_packet
 from mcproto.packets.status.status import StatusRequest, StatusResponse
 
+from .java_manager import JavaManager
+
 logger = logging.getLogger("astrbot_plugin_minecraft.server")
 
 PAPER_API = "https://fill.papermc.io/v3/projects/paper/versions/{version}/builds/latest"
