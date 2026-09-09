@@ -150,7 +150,7 @@ class TestAutonomousBehaviorManager(unittest.IsolatedAsyncioTestCase):
         }
         manager = AutonomousBehaviorManager(bot, config)
         
-        self.assertEqual(len(manager._behaviors), 6)
+        self.assertEqual(len(manager._behaviors), 7)
         self.assertIsInstance(manager._behaviors[0], EatWhenHungryBehavior)
         self.assertIsInstance(manager._behaviors[1], FleeFromMobsBehavior)
 
@@ -164,7 +164,7 @@ class TestAutonomousBehaviorManager(unittest.IsolatedAsyncioTestCase):
         }
         manager = AutonomousBehaviorManager(bot, config)
         
-        self.assertEqual(len(manager._behaviors), 5)
+        self.assertEqual(len(manager._behaviors), 6)
         self.assertIsInstance(manager._behaviors[0], EatWhenHungryBehavior)
 
     async def test_manager_run_checks_behaviors(self):

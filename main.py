@@ -314,9 +314,16 @@ class MinecraftPlugin(Star):
         return await self._llm_chat(prompt)
 
     async def _idle_speak(self, text: str) -> None:
-        """把角色的自主发言（小动作/自言自语）推送给订阅者。"""
+        """把角色的自主发言（小动作/自言自语）发到游戏内聊天 + 推送给订阅者。"""
         if not text:
             return
+        # 游戏内说出（第一人称可见）
+        if self.bot and self.bot.connected:
+            try:
+                await self.bot.send_chat(text[:100])
+            except Exception:  # noqa: BLE001
+                pass
+        # 推送到 QQ 群订阅者
         await self.bridge.broadcast(f"【{self._bot_username}】{text}")
 
     async def _in_game_llm_reply(self, sender: str, text: str) -> None:

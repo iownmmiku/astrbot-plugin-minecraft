@@ -344,6 +344,50 @@ class HungryReactionBehavior(Behavior):
         return None
 
 
+class AmbientWanderBehavior(Behavior):
+    """空闲时小范围闲逛，让角色看起来「活着」（参考女仆 FindSit/Joy 的移动表现）。
+
+    会每隔一段随机时间，朝出生点附近随机方向走几步；用户命令（动作队列）优先，
+    有任务执行时不会闲逛。
+    """
+
+    def __init__(self, *, radius: float = 10.0, min_interval: float = 120.0,
+                 max_interval: float = 300.0):
+        super().__init__(name="ambient_wander", priority=8, check_interval=10.0)
+        self.radius = radius
+        self.min_interval = min_interval
+        self.max_interval = max_interval
+        self.last_wander = 0.0
+        self._rng = random.Random()
+
+    async def should_trigger(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> bool:
+        if not bot.connected or bot.position is None:
+            return False
+        # 有动作在执行时不闲逛
+        if bot.action_queue and bot.action_queue.get_current_task() is not None:
+            return False
+        gap = self._rng.uniform(self.min_interval, self.max_interval)
+        if time.time() - self.last_wander < gap:
+            return False
+        return self._rng.random() < 0.5
+
+    async def execute(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> str | None:
+        if bot.position is None:
+            return "无当前坐标"
+        bx, by, bz = bot.position
+        angle = self._rng.uniform(0, 2 * math.pi)
+        dist = self._rng.uniform(2.0, self.radius)
+        tx = bx + math.cos(angle) * dist
+        tz = bz + math.sin(angle) * dist
+        logger.info("空闲闲逛：走向 (%.1f, %.1f)", tx, tz)
+        if bot.action_queue:
+            bot.action_queue.submit("move", {"x": tx, "z": tz, "timeout": 30.0}, priority=self.priority)
+        else:
+            await bot.move_to(tx, tz, timeout=30.0)
+        self.last_wander = time.time()
+        return None
+
+
 # ============================================================
 # 管理器
 # ============================================================
@@ -386,6 +430,7 @@ class AutonomousBehaviorManager:
             self._behaviors.append(NearbyEntityReactionBehavior())
             self._behaviors.append(HurtReactionBehavior())
             self._behaviors.append(HungryReactionBehavior(threshold=max(1, min(20, int(cfg.get("idle_hungry_threshold", 6))))))
+            self._behaviors.append(AmbientWanderBehavior())
 
         logger.info("自主行为管理器初始化，已注册 %d 个行为（人格：%s）",
                     len(self._behaviors), self.persona.name if self.persona else "无")
