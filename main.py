@@ -395,21 +395,21 @@ class MinecraftPlugin(Star):
         await self.bridge.broadcast(f"【{self._bot_username}】{text}")
 
     async def _in_game_llm_reply(self, sender: str, text: str) -> None:
-        “””游戏内 LLM 回复（使用 AstrBot 的人格配置）。”””
+        """游戏内 LLM 回复（使用 AstrBot 的人格配置）。"""
         try:
             prompt = (
-                f”玩家 {sender} 在 Minecraft 世界里对你说：{text}\n”
-                f”请以「{self._bot_username}」的身份简短回应（30 字以内），”
-                “口语化，不要加引号和前缀。”
+                f"玩家 {sender} 在 Minecraft 世界里对你说：{text}\n"
+                f"请以「{self._bot_username}」的身份简短回应（30 字以内），"
+                "口语化，不要加引号和前缀。"
             )
             # 使用 AstrBot 的 system_prompt，而不是插件内置人格
             reply = await self._llm_chat(prompt)
             if reply and self.bot and self.bot.connected:
-                reply = reply.strip().strip('”””')
+                reply = reply.strip().strip('"""')
                 await self.bot.send_chat(reply[:100])
-                await self.bridge.broadcast(f”【MC】{self._bot_username}：{reply[:100]}”)
+                await self.bridge.broadcast(f"【MC】{self._bot_username}：{reply[:100]}")
         except Exception:  # noqa: BLE001
-            logger.exception(“游戏内 LLM 回复失败”)
+            logger.exception("游戏内 LLM 回复失败")
 
     # ---------- 状态文本 ----------
     async def _status_text(self) -> str:

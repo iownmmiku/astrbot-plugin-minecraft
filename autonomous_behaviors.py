@@ -390,6 +390,110 @@ class SurvivalFoodBehavior(Behavior):
         return None
 
 
+class ResourceExplorationBehavior(Behavior):
+    """Phase 2: 探索和资源收集行为 - 饥饿且无食物时主动探索收集资源。
+    
+    当机器人饥饿度低且快捷栏没有食物时，会：
+    1. 探索周围区域寻找可破坏的方块（树木、草丛等可能掉落食物的方块）
+    2. 收集附近的资源方块
+    3. 使用 LLM 决策下一步行动（基于当前状态）
+    """
+
+    def __init__(self, *, hunger_threshold: int = 10, search_radius: int = 20, 
+                 cooldown: float = 60.0):
+        super().__init__(name="resource_exploration", priority=65, check_interval=10.0)
+        self.hunger_threshold = hunger_threshold
+        self.search_radius = search_radius
+        self.cooldown = cooldown
+        self.last_search = 0.0
+        self._rng = random.Random()
+
+    async def should_trigger(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> bool:
+        if not bot.connected or bot.position is None:
+            return False
+        if time.time() - self.last_search < self.cooldown:
+            return False
+        # 饿了但没有食物 → 需要主动收集
+        if bot.food < self.hunger_threshold:
+            return bot.find_food_slot() is None
+        return False
+
+    async def execute(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> str | None:
+        logger.info("触发资源探索：饥饿度 %d，库存无食物，开始探索", bot.food)
+        
+        if bot.position is None:
+            return "无当前坐标"
+        
+        bx, by, bz = bot.position
+        
+        # 使用 LLM 决策（如果可用）
+        if manager.llm_cb:
+            context = (
+                f"位置: ({bx:.1f}, {by:.1f}, {bz:.1f})\n"
+                f"饥饿度: {bot.food}/20\n"
+                f"生命值: {bot.health:.1f}/20\n"
+                f"库存: 快捷栏无食物"
+            )
+            try:
+                decision = await manager.llm(
+                    f"你是 Minecraft 世界中的 AI 玩家。\n\n当前状态：\n{context}\n\n"
+                    "你很饿但没有食物。请决定接下来应该做什么（20字以内），例如：\n"
+                    "- \"寻找树木收集苹果\"\n"
+                    "- \"找动物获取肉\"\n"
+                    "- \"收集草丛找种子\"\n\n"
+                    "只说你要做什么："
+                )
+                if decision:
+                    await manager.speak(f"（环顾四周）{decision.strip()[:50]}")
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            await manager.speak("（肚子饿了）得找点吃的...")
+        
+        # 随机探索策略：朝随机方向移动一段距离
+        angle = self._rng.uniform(0, 2 * math.pi)
+        dist = self._rng.uniform(10.0, float(self.search_radius))
+        tx = bx + math.cos(angle) * dist
+        tz = bz + math.sin(angle) * dist
+        
+        logger.info("资源探索：移动到 (%.1f, %.1f) 寻找资源", tx, tz)
+        
+        # 提交移动动作
+        if bot.action_queue:
+            bot.action_queue.submit("move", {"x": tx, "z": tz, "timeout": 45.0}, priority=self.priority)
+        else:
+            await bot.move_to(tx, tz, timeout=45.0)
+        
+        # 到达后尝试收集附近方块（简化实现：收集脚下附近的方块）
+        await asyncio.sleep(2.0)
+        
+        if bot.position:
+            cx, cy, cz = bot.position
+            # 尝试挖掘周围 3x3 范围内的方块（可能掉落资源）
+            collected = 0
+            for dx in range(-1, 2):
+                for dz in range(-1, 2):
+                    if collected >= 3:  # 限制收集数量，避免长时间卡住
+                        break
+                    target_x, target_z = int(cx) + dx, int(cz) + dz
+                    target_y = int(cy)
+                    
+                    # 尝试挖掘（忽略错误）
+                    try:
+                        err = await bot.mine(target_x, target_y, target_z, timeout=3.0)
+                        if err is None:
+                            collected += 1
+                            await asyncio.sleep(0.5)
+                    except Exception:  # noqa: BLE001
+                        pass
+            
+            if collected > 0:
+                logger.info("资源收集：破坏了 %d 个方块", collected)
+        
+        self.last_search = time.time()
+        return None
+
+
 class AmbientWanderBehavior(Behavior):
     """空闲时小范围闲逛，让角色看起来「活着」（参考女仆 FindSit/Joy 的移动表现）。
 
@@ -434,6 +538,98 @@ class AmbientWanderBehavior(Behavior):
         return None
 
 
+class SimpleBuildingBehavior(Behavior):
+    """Phase 3: 简单建造行为 - 空闲时自动建造简单庇护所。
+    
+    当机器人空闲且满足条件时（生命和饥饿都较高），会：
+    1. 使用 LLM 决定建造目标（小屋、围墙、装饰等）
+    2. 在当前位置附近放置方块形成简单结构
+    3. 优先级很低，不打扰其他行为
+    """
+
+    def __init__(self, *, min_health: float = 15.0, min_food: int = 12, 
+                 cooldown: float = 600.0):
+        super().__init__(name="simple_building", priority=5, check_interval=30.0)
+        self.min_health = min_health
+        self.min_food = min_food
+        self.cooldown = cooldown
+        self.last_build = 0.0
+        self._rng = random.Random()
+
+    async def should_trigger(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> bool:
+        if not bot.connected or bot.position is None:
+            return False
+        if time.time() - self.last_build < self.cooldown:
+            return False
+        # 有其他动作在执行时不建造
+        if bot.action_queue and bot.action_queue.get_current_task() is not None:
+            return False
+        # 生命值和饥饿度都健康才建造
+        if bot.health < self.min_health or bot.food < self.min_food:
+            return False
+        # 概率触发，避免过于频繁
+        return self._rng.random() < 0.3
+
+    async def execute(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> str | None:
+        logger.info("触发建造行为：准备建造简单结构")
+        
+        if bot.position is None:
+            return "无当前坐标"
+        
+        bx, by, bz = bot.position
+        
+        # 使用 LLM 决策建造内容（如果可用）
+        build_plan = "简单的方块堆"
+        if manager.llm_cb:
+            try:
+                decision = await manager.llm(
+                    f"你是 Minecraft 世界中的 AI 玩家。\n\n"
+                    f"当前位置: ({bx:.1f}, {by:.1f}, {bz:.1f})\n"
+                    f"生命值: {bot.health:.1f}/20，饥饿度: {bot.food}/20\n\n"
+                    "你打算建造点什么？（15字以内），例如：\n"
+                    "- \"搭个小土堆做标记\"\n"
+                    "- \"围一圈方块作围栏\"\n"
+                    "- \"堆几个方块当装饰\"\n\n"
+                    "只说你要建造什么："
+                )
+                if decision:
+                    build_plan = decision.strip()[:30]
+                    await manager.speak(f"（看了看周围）{build_plan}")
+            except Exception:  # noqa: BLE001
+                await manager.speak("（灵感涌现）搭点东西吧...")
+        else:
+            await manager.speak("（看了看周围）搭点东西吧...")
+        
+        # 简单建造逻辑：在附近放置几个方块形成简单结构
+        # 策略1：在当前位置旁边堆一个小柱子（3格高）
+        build_x, build_z = int(bx) + 2, int(bz)
+        built_count = 0
+        
+        for build_y in range(int(by), int(by) + 3):
+            try:
+                # 注意：这里调用 place_block 方法（需要在 bot_client.py 中实现）
+                err = await bot.place_block(build_x, build_y, build_z, timeout=5.0)
+                if err is None:
+                    built_count += 1
+                    logger.info("建造：在 (%d, %d, %d) 放置方块", build_x, build_y, build_z)
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.warning("放置方块失败：%s", err)
+                    break
+            except Exception as e:  # noqa: BLE001
+                logger.warning("建造出错：%s", e)
+                break
+        
+        if built_count > 0:
+            await manager.speak(f"（完成建造）嗯，放了{built_count}个方块～")
+            logger.info("建造完成：共放置 %d 个方块", built_count)
+        else:
+            await manager.speak("（挠头）好像暂时建不了...")
+        
+        self.last_build = time.time()
+        return None
+
+
 # ============================================================
 # 管理器
 # ============================================================
@@ -473,6 +669,12 @@ class AutonomousBehaviorManager:
                 threshold=int(cfg.get("survival_food_threshold", 14)),
                 cooldown=float(cfg.get("survival_food_cooldown", 10.0)),
             ))
+            # Phase 2: 资源探索行为（饥饿且无食物时主动探索）
+            self._behaviors.append(ResourceExplorationBehavior(
+                hunger_threshold=int(cfg.get("survival_food_threshold", 14)),
+                search_radius=int(cfg.get("exploration_radius", 20)),
+                cooldown=float(cfg.get("exploration_cooldown", 60.0)),
+            ))
 
         # 生动反应层
         if cfg.get("enable_idle_behaviors", True):
@@ -484,6 +686,14 @@ class AutonomousBehaviorManager:
             self._behaviors.append(HurtReactionBehavior())
             self._behaviors.append(HungryReactionBehavior(threshold=max(1, min(20, int(cfg.get("idle_hungry_threshold", 6))))))
             self._behaviors.append(AmbientWanderBehavior())
+            
+            # Phase 3: 建造行为（空闲时建造）
+            if cfg.get("enable_building_behaviors", True):
+                self._behaviors.append(SimpleBuildingBehavior(
+                    min_health=float(cfg.get("building_min_health", 15.0)),
+                    min_food=int(cfg.get("building_min_food", 12)),
+                    cooldown=float(cfg.get("building_cooldown", 600.0)),
+                ))
 
         logger.info("自主行为管理器初始化，已注册 %d 个行为（人格：%s）",
                     len(self._behaviors), self.persona.name if self.persona else "无")

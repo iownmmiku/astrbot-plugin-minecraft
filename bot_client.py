@@ -404,6 +404,38 @@ class SBTArmAnimation(PlayServerBoundPacket):
         buf.write_varint(self.hand)
 
 
+@final
+@define
+class SBTBlockPlace(PlayServerBoundPacket):
+    """ServerBound Use Item On / Block Place (1.20.1)：在方块表面放置物品。
+    
+    hand / location(打包 position) / face / cursor_x/y/z / inside_block / sequence
+    """
+
+    PACKET_ID = SB_BLOCK_PLACE
+
+    hand: int  # 0=主手，1=副手
+    x: int
+    y: int
+    z: int
+    face: int  # 放置在哪个面：0=下 1=上 2=北 3=南 4=西 5=东
+    cursor_x: float = 0.5
+    cursor_y: float = 0.5
+    cursor_z: float = 0.5
+    inside_block: bool = False
+    sequence: int = 0
+
+    def serialize_to(self, buf: Buffer) -> None:
+        buf.write_varint(self.hand)
+        buf.write_value(StructFormat.LONGLONG, pack_position(self.x, self.y, self.z))
+        buf.write_varint(self.face)
+        buf.write_value(StructFormat.FLOAT, self.cursor_x)
+        buf.write_value(StructFormat.FLOAT, self.cursor_y)
+        buf.write_value(StructFormat.FLOAT, self.cursor_z)
+        buf.write_value(StructFormat.BOOL, self.inside_block)
+        buf.write_varint(self.sequence)
+
+
 class LoginStart120:
     """1.20.1 的 LoginStart：username + Optional<UUID>。
 
@@ -1108,6 +1140,46 @@ class MCBot:
         if not self.connected:
             return "连接已断开"
         await self._send(SBTBlockDig(DIG_FINISH, x, y, z, face, self._dig_sequence))
+        return None
+
+    async def place_block(self, x: int, y: int, z: int, *, timeout: float = 30.0) -> str | None:
+        """在指定位置放置方块。成功返回 None，失败返回原因。
+        
+        注意：这需要手持可放置的方块物品。目前简化实现，默认使用主手当前物品。
+        """
+        if not self.connected or self.position is None:
+            return "机器人未连接或尚未同步位置"
+        bx, by, bz = self.position
+        dist = math.sqrt((bx - x - 0.5) ** 2 + (by - y) ** 2 + (bz - z - 0.5) ** 2)
+        if dist > REACH_DISTANCE:
+            return f"目标位置距离 {dist:.1f} 格，超出可放置距离（{REACH_DISTANCE} 格）"
+        
+        # 计算放置面：通常在目标位置下方的方块顶部放置（face=1，即上表面）
+        # 简化实现：在目标位置下方一格的上表面放置
+        place_on_y = y - 1
+        face = FACE_UP
+        
+        # 面向目标位置
+        yaw = math.degrees(math.atan2(x + 0.5 - bx, z + 0.5 - bz))
+        pitch = math.degrees(math.atan2(y + 0.5 - by, math.hypot(x + 0.5 - bx, z + 0.5 - bz)))
+        await self._send(SBTLook(yaw, pitch))
+        self.yaw, self.pitch = yaw, pitch
+        
+        # 发送放置方块包（在目标下方的上表面）
+        await self._send(SBTArmAnimation(0))
+        await self._send(SBTBlockPlace(
+            hand=0,
+            x=x,
+            y=place_on_y,
+            z=z,
+            face=face,
+            cursor_x=0.5,
+            cursor_y=1.0,  # 点击上表面的顶部
+            cursor_z=0.5,
+            inside_block=False,
+            sequence=0
+        ))
+        await asyncio.sleep(0.1)
         return None
 
     @staticmethod
