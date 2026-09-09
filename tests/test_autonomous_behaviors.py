@@ -34,7 +34,7 @@ class TestEatWhenHungryBehavior(unittest.IsolatedAsyncioTestCase):
         bot.food = 8
         behavior = EatWhenHungryBehavior(threshold=10)
         
-        result = await behavior.should_trigger(bot)
+        result = await behavior.should_trigger(bot, None)
         self.assertTrue(result)
 
     async def test_should_not_trigger_when_not_hungry(self):
@@ -43,7 +43,7 @@ class TestEatWhenHungryBehavior(unittest.IsolatedAsyncioTestCase):
         bot.food = 15
         behavior = EatWhenHungryBehavior(threshold=10)
         
-        result = await behavior.should_trigger(bot)
+        result = await behavior.should_trigger(bot, None)
         self.assertFalse(result)
 
     async def test_execute_logs_warning(self):
@@ -52,7 +52,7 @@ class TestEatWhenHungryBehavior(unittest.IsolatedAsyncioTestCase):
         bot.food = 5
         behavior = EatWhenHungryBehavior(threshold=10)
         
-        result = await behavior.execute(bot)
+        result = await behavior.execute(bot, None)
         
         # execute 返回 None，实际逻辑是记录日志
         self.assertIsNone(result)
@@ -68,7 +68,7 @@ class TestFleeFromMobsBehavior(unittest.IsolatedAsyncioTestCase):
         }
         behavior = FleeFromMobsBehavior()
         
-        result = await behavior.should_trigger(bot)
+        result = await behavior.should_trigger(bot, None)
         self.assertTrue(result)
 
     async def test_should_not_trigger_when_no_entities(self):
@@ -77,7 +77,7 @@ class TestFleeFromMobsBehavior(unittest.IsolatedAsyncioTestCase):
         bot.entities = {}
         behavior = FleeFromMobsBehavior()
         
-        result = await behavior.should_trigger(bot)
+        result = await behavior.should_trigger(bot, None)
         self.assertFalse(result)
 
     async def test_should_not_trigger_when_entities_far(self):
@@ -89,7 +89,7 @@ class TestFleeFromMobsBehavior(unittest.IsolatedAsyncioTestCase):
         }
         behavior = FleeFromMobsBehavior()
         
-        result = await behavior.should_trigger(bot)
+        result = await behavior.should_trigger(bot, None)
         self.assertFalse(result)
 
     async def test_execute_submits_flee_action(self):
@@ -102,7 +102,7 @@ class TestFleeFromMobsBehavior(unittest.IsolatedAsyncioTestCase):
         }
         behavior = FleeFromMobsBehavior()
         
-        result = await behavior.execute(bot)
+        result = await behavior.execute(bot, None)
         
         # 应该提交了移动动作
         bot.action_queue.submit.assert_called_once()
@@ -132,7 +132,7 @@ class TestFleeFromMobsBehavior(unittest.IsolatedAsyncioTestCase):
         bot.move_to = AsyncMock(return_value=None)
         behavior = FleeFromMobsBehavior()
         
-        result = await behavior.execute(bot)
+        result = await behavior.execute(bot, None)
         
         # 应该调用了阻塞 move_to
         bot.move_to.assert_called_once()
@@ -150,7 +150,7 @@ class TestAutonomousBehaviorManager(unittest.IsolatedAsyncioTestCase):
         }
         manager = AutonomousBehaviorManager(bot, config)
         
-        self.assertEqual(len(manager._behaviors), 2)
+        self.assertEqual(len(manager._behaviors), 6)
         self.assertIsInstance(manager._behaviors[0], EatWhenHungryBehavior)
         self.assertIsInstance(manager._behaviors[1], FleeFromMobsBehavior)
 
@@ -164,7 +164,7 @@ class TestAutonomousBehaviorManager(unittest.IsolatedAsyncioTestCase):
         }
         manager = AutonomousBehaviorManager(bot, config)
         
-        self.assertEqual(len(manager._behaviors), 1)
+        self.assertEqual(len(manager._behaviors), 5)
         self.assertIsInstance(manager._behaviors[0], EatWhenHungryBehavior)
 
     async def test_manager_run_checks_behaviors(self):
@@ -216,7 +216,7 @@ class TestAutonomousBehaviorManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(behavior.check_interval, 2.0)
         
         # should_trigger 应该正确判断
-        result = await behavior.should_trigger(bot)
+        result = await behavior.should_trigger(bot, None)
         self.assertTrue(result)
 
 

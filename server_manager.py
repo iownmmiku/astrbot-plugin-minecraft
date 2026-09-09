@@ -161,6 +161,7 @@ class LocalServerManager:
         port: int = 25565,
         motd: str = "AstrBot Minecraft",
         java_path: str = "",
+        world_import_dir: str = "",
         log_cb: Callable[[str], None] | None = None,
     ):
         self.data_dir = Path(data_dir)
@@ -169,6 +170,7 @@ class LocalServerManager:
         self.port = port
         self.motd = motd
         self.java_path = java_path
+        self.world_import_dir = Path(world_import_dir) if world_import_dir else None
         self.log_cb = log_cb or (lambda line: logger.info("[mc-server] %s", line))
         self.java_manager = JavaManager()
 
@@ -252,6 +254,37 @@ class LocalServerManager:
         lines = [f"{k}={v}" for k, v in props.items()]
         (self.server_dir / "server.properties").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    # ---------- 单人存档导入（测试插件 / 沿用现有世界用） ----------
+    async def _import_world_if_needed(self) -> str | None:
+        """把单人存档复制为服务器世界（仅当 world 目录尚未生成时）。
+
+        复制的是原存档的副本，不会改动你的单机存档；失败时回退为新世界。
+        """
+        if not self.world_import_dir:
+            return None
+        src = self.world_import_dir
+        world = self.server_dir / "world"
+        if not src.is_dir():
+            return f"要导入的存档目录不存在：{src}"
+        if world.exists() and any(world.iterdir()):
+            self.log_cb("服务器世界已存在，跳过存档导入")
+            return None
+        self.log_cb(f"导入单人存档：{src} → {world}")
+        self.state = "downloading"
+        try:
+            await asyncio.to_thread(self._copy_world, src, world)
+            self.log_cb("单人存档导入完成")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            return f"存档导入失败（将生成新世界）：{exc}"
+
+    def _copy_world(self, src: Path, dst: Path) -> None:
+        import shutil
+        shutil.copytree(
+            src, dst,
+            ignore=shutil.ignore_patterns("session.lock", "*.tmp", "*.lock"),
+        )
+
     def _write_eula(self) -> None:
         (self.server_dir / "eula.txt").write_text(
             "#By changing the setting below to TRUE you are indicating your agreement to our EULA "
@@ -268,6 +301,9 @@ class LocalServerManager:
         if err:
             return err
         self.server_dir.mkdir(parents=True, exist_ok=True)
+        import_err = await self._import_world_if_needed()
+        if import_err:
+            return import_err
         self._write_eula()
         self._write_server_properties()
         if not self.java_path:

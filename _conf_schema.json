@@ -54,6 +54,12 @@
     "hint": "本地起服需要 Java 17+。留空时依次尝试 PATH 与本机常见安装位置；指定后优先使用，例如 C:\\Program Files\\Zulu\\zulu-21\\bin\\java.exe",
     "default": ""
   },
+  "local_world_import": {
+    "description": "导入单人存档作为服务器世界（测试插件用）",
+    "type": "string",
+    "hint": "填你的单机存档目录路径，例如 D:\\.minecraft\\versions\\香草纪元：食旅纪行\\saves\\新的世界。首次启动会将该存档复制为服务器世界（不动你的原存档），机器人和你都能进入，方便第一人称观察测试；留空则生成全新世界。",
+    "default": ""
+  },
   "auto_connect": {
     "description": "插件加载后自动连接服务器",
     "type": "bool",

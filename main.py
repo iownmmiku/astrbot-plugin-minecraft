@@ -24,6 +24,7 @@ from astrbot.core.star.star_tools import StarTools
 
 from .bot_client import MCBot
 from .chat_bridge import ChatBridge
+from .persona import Persona, build_persona
 from .server_manager import LocalServerManager
 from .launcher_api_client import LauncherAPIClient
 
@@ -52,10 +53,44 @@ class MinecraftPlugin(Star):
         self.bot: MCBot | None = None
         self.launcher_api: LauncherAPIClient | None = None
         self._connecting = False
+        self._persona_obj: Persona | None = None
+        self._persona_choice_file = self.data_dir / "persona_choice.json"
 
     # ---------- 配置 ----------
     def _cfg(self, key: str, default=None):
         return self.config.get(key, default)
+
+    @property
+    def _persona(self) -> Persona:
+        """当前人格（WebUI 配置优先，其次 /mc人格 指令保存的选择）。"""
+        persona_id = self._cfg("persona", "maid")
+        try:
+            if self._persona_choice_file.exists():
+                import json
+                saved = json.loads(self._persona_choice_file.read_text(encoding="utf-8"))
+                if saved.get("persona"):
+                    persona_id = saved["persona"]
+        except Exception:  # noqa: BLE001
+            pass
+        if self._persona_obj is None or self._persona_obj.persona_id != persona_id:
+            self._persona_obj = build_persona(
+                persona_id,
+                username=self._bot_username,
+                custom_desc=self._cfg("persona_custom_desc", ""),
+            )
+        return self._persona_obj
+
+    def _set_persona(self, persona_id: str) -> None:
+        """切换人格并持久化（下次连接自动生效）。"""
+        self.config["persona"] = persona_id
+        self._persona_obj = None
+        try:
+            import json
+            self._persona_choice_file.write_text(
+                json.dumps({"persona": persona_id}, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError:
+            pass
 
     @property
     def _bot_username(self) -> str:
@@ -164,6 +199,7 @@ class MinecraftPlugin(Star):
                 port=int(self._cfg("local_port", 25565)),
                 motd=self._cfg("local_motd", "AstrBot Minecraft"),
                 java_path=self._cfg("java_path", ""),
+                world_import_dir=self._cfg("local_world_import", ""),
                 log_cb=self._server_log,
             )
         return self.server
@@ -180,11 +216,17 @@ class MinecraftPlugin(Star):
         self._connecting = True
         try:
             host, port = self._bot_target()
-            # 准备行为配置（阶段 3）
+            # 准备行为配置（阶段 3 + 生动反应层）
             behavior_config = {
                 "enable_autonomous_behaviors": bool(self._cfg("enable_autonomous_behaviors", True)),
                 "auto_eat_threshold": int(self._cfg("auto_eat_threshold", 10)),
                 "auto_flee_enabled": bool(self._cfg("auto_flee_enabled", False)),
+                # 生动反应（参考车万女仆）
+                "enable_idle_behaviors": bool(self._cfg("enable_idle_behaviors", True)),
+                "idle_broadcast_interval": int(self._cfg("idle_broadcast_interval", 180)),
+                "idle_llm_generation": bool(self._cfg("idle_llm_generation", True)),
+                "idle_hungry_threshold": int(self._cfg("idle_hungry_threshold", 6)),
+                "enable_mood": bool(self._cfg("enable_mood", True)),
             }
             self.bot = MCBot(
                 host,
@@ -197,6 +239,13 @@ class MinecraftPlugin(Star):
                 pathfinding_max_cost=int(self._cfg("pathfinding_max_cost", 1000)),
             )
             self._wire_bot(self.bot)
+            # 注入人格与发言/LLM 通道（生动反应用）
+            if self.bot.behavior_manager:
+                self.bot.behavior_manager.persona = self._persona
+                self.bot.behavior_manager.set_channel(
+                    speak_cb=self._idle_speak,
+                    llm_cb=self._idle_llm,
+                )
             err = await self.bot.connect()
             if err:
                 logger.error("进服失败：%s", err)
@@ -220,6 +269,9 @@ class MinecraftPlugin(Star):
             return  # 忽略机器人自己发出的消息回显
         tag = f"【MC】{sender}：" if sender else "【MC】"
         await self.bridge.broadcast(f"{tag}{text}")
+        # 有人跟角色说话 → 心情上升（参考女仆好感）
+        if self.bot and self.bot.behavior_manager:
+            self.bot.behavior_manager.note_interaction()
         # 游戏内 @机器人 或点名 → LLM 回复（可选）
         if self._cfg("auto_reply_in_game", True) and sender:
             name = self._bot_username.lower()
@@ -231,31 +283,51 @@ class MinecraftPlugin(Star):
         await self.bridge.broadcast(f"【MC】机器人已断开：{reason}")
 
     # ---------- LLM ----------
-    async def _llm_text(self, prompt: str) -> str | None:
+    async def _llm_chat(self, prompt: str, system_prompt: str | None = None) -> str | None:
+        """统一 LLM 调用：支持指定模型（llm_model 配置）与人设 system_prompt。"""
+        model = (self._cfg("llm_model", "") or "").strip() or None
         try:
             provider = self.context.get_using_provider()
             if provider:
-                resp = await provider.text_chat(prompt=prompt, contexts=[])
+                resp = await provider.text_chat(prompt=prompt, contexts=[], model=model,
+                                                system_prompt=system_prompt)
                 if resp and resp.result_chain:
                     return str(resp.result_chain)
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM 主路径失败：%s", exc)
         try:
             pid = self.context.get_current_chat_provider_id("")
-            resp = await self.context.llm_generate(chat_provider_id=pid, prompt=prompt)
+            # 降级路径不支持 system_prompt，直接拼进 prompt
+            merged = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+            resp = await self.context.llm_generate(chat_provider_id=pid, prompt=merged)
             if resp and resp.result_chain:
                 return str(resp.result_chain)
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM 降级路径失败：%s", exc)
         return None
 
+    async def _llm_text(self, prompt: str) -> str | None:
+        return await self._llm_chat(prompt)
+
+    async def _idle_llm(self, prompt: str) -> str | None:
+        """空闲行为用的 LLM 通道（自动带人设与配置模型）。"""
+        return await self._llm_chat(prompt)
+
+    async def _idle_speak(self, text: str) -> None:
+        """把角色的自主发言（小动作/自言自语）推送给订阅者。"""
+        if not text:
+            return
+        await self.bridge.broadcast(f"【{self._bot_username}】{text}")
+
     async def _in_game_llm_reply(self, sender: str, text: str) -> None:
         try:
+            persona = self._persona
             prompt = (
-                f"你是 Minecraft 服务器里的玩家「{self._bot_username}」。玩家 {sender} 对你说：{text}\n"
-                "请用简短、口语化的中文回复，不超过 30 个字，不要加引号和前缀。"
+                f"玩家 {sender} 在 Minecraft 世界里对你说：{text}\n"
+                f"请以「{self._bot_username}」的身份，用 {persona.self_ref} 的语气"
+                "简短回应（30 字以内），口语化，不要加引号和前缀。"
             )
-            reply = await self._llm_text(prompt)
+            reply = await self._llm_chat(prompt, system_prompt=persona.system_prompt())
             if reply and self.bot and self.bot.connected:
                 reply = reply.strip().strip('"“”')
                 await self.bot.send_chat(reply[:100])
@@ -302,6 +374,67 @@ class MinecraftPlugin(Star):
             return
         names = self.bot.player_names()
         yield event.plain_result("在线玩家：" + ("、".join(names) if names else "无"))
+
+    @filter.command("mc人格", alias={"人格", "mcpersona"})
+    async def mc_persona(self, event: AstrMessageEvent):
+        """查看 / 切换角色人格（影响空闲台词与游戏内回复的语气）。"""
+        from .persona import PERSONAS
+        arg = _cmd_rest(event).strip()
+        if not arg:
+            current = self._persona
+            choices = "、".join(f"{k}（{v['name']}）" for k, v in PERSONAS.items())
+            yield event.plain_result(
+                f"当前人格：{current.name}（{current.persona_id}）\n"
+                f"可选：{choices}\n用法：/mc人格 <名字>"
+            )
+            return
+        name = arg.split()[0].lower()
+        if name not in PERSONAS:
+            yield event.plain_result(f"未知人格「{name}」，可选：{'、'.join(PERSONAS)}")
+            return
+        self._set_persona(name)
+        # 已连接的 bot 立即换人设
+        if self.bot and self.bot.behavior_manager:
+            self.bot.behavior_manager.persona = self._persona
+        yield event.plain_result(f"人格已切换为：{PERSONAS[name]['name']}（下次发言生效）")
+
+    @filter.command("mc模型", alias={"模型", "mcmodel"})
+    async def mc_model(self, event: AstrMessageEvent):
+        """查看 / 切换 LLM 模型（用于空闲台词与游戏内回复生成）。"""
+        arg = _cmd_rest(event).strip()
+        provider = self.context.get_using_provider()
+        if provider is None:
+            yield event.plain_result("未找到 LLM Provider，请先在 AstrBot 中配置模型服务商。")
+            return
+        if not arg:
+            current = self._cfg("llm_model", "") or "（使用 Provider 默认模型）"
+            yield event.plain_result(
+                f"当前模型：{current}\n"
+                "用法：/mc模型 <模型名> 切换（输入不带参数时列出可用模型）\n"
+                "可用模型：/mc模型 列表"
+            )
+            return
+        if arg.lower() in ("列表", "list", "ls"):
+            try:
+                models = await provider.get_models()
+            except Exception as exc:  # noqa: BLE001
+                yield event.plain_result(f"获取模型列表失败：{exc}")
+                return
+            if not models:
+                yield event.plain_result("该 Provider 未提供模型列表，请直接输入模型名。")
+                return
+            yield event.plain_result("可用模型：" + "、".join(models[:30]))
+            return
+        target = arg.split()[0]
+        try:
+            models = await provider.get_models()
+            if models and target not in models:
+                yield event.plain_result(f"模型「{target}」不在可用列表里。\n可用：{'、'.join(models[:20])}")
+                return
+        except Exception:  # noqa: BLE001
+            pass  # 拿不到列表时允许直接输入
+        self.config["llm_model"] = target
+        yield event.plain_result(f"模型已切换为：{target}（本次运行生效；持久保存请到 WebUI 插件配置）")
 
     @filter.command("mc起服")
     async def mc_start_server(self, event: AstrMessageEvent):
