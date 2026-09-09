@@ -25,6 +25,7 @@ from astrbot.core.star.star_tools import StarTools
 from .bot_client import MCBot
 from .chat_bridge import ChatBridge
 from .server_manager import LocalServerManager
+from .launcher_api_client import LauncherAPIClient
 
 PLUGIN_VERSION = "0.1.0"
 PLUGIN_NAME = "astrbot_plugin_minecraft"
@@ -49,6 +50,7 @@ class MinecraftPlugin(Star):
         self.bridge = ChatBridge(self.data_dir, push_cb=self._push_to_subscribers)
         self.server: LocalServerManager | None = None
         self.bot: MCBot | None = None
+        self.launcher_api: LauncherAPIClient | None = None
         self._connecting = False
 
     # ---------- 配置 ----------
@@ -60,13 +62,28 @@ class MinecraftPlugin(Star):
         return self._cfg("bot_username", "AstrBot") or "AstrBot"
 
     def _bot_target(self) -> tuple[str, int]:
-        if self._cfg("server_mode", "local") == "remote":
+        mode = self._cfg("server_mode", "local")
+        if mode == "remote":
             return self._cfg("remote_host", "127.0.0.1"), int(self._cfg("remote_port", 25565))
+        elif mode == "launcher_api":
+            # launcher_api 模式：从 API 获取服务器地址
+            # 默认假设服务器在同一台机器
+            api_url = self._cfg("launcher_api_url", "http://127.0.0.1:8765")
+            # 提取主机地址（简单解析）
+            import urllib.parse
+            parsed = urllib.parse.urlparse(api_url)
+            host = parsed.hostname or "127.0.0.1"
+            port = int(self._cfg("local_port", 25565))  # 使用配置的端口
+            return host, port
         return "127.0.0.1", int(self._cfg("local_port", 25565))
 
     @property
     def _is_local(self) -> bool:
         return self._cfg("server_mode", "local") == "local"
+    
+    @property
+    def _is_launcher_api(self) -> bool:
+        return self._cfg("server_mode", "local") == "launcher_api"
 
     # ---------- 生命周期 ----------
     async def initialize(self):
@@ -86,6 +103,7 @@ class MinecraftPlugin(Star):
 
     async def _auto_start(self) -> None:
         try:
+            # 根据模式启动服务器
             if self._is_local and await self._ensure_server() is not None:
                 err = await self.server.start()
                 if err:
@@ -95,6 +113,33 @@ class MinecraftPlugin(Star):
                     logger.error("本地服务器启动超时")
                     return
                 logger.info("本地服务器就绪")
+            elif self._is_launcher_api:
+                # 启动器 API 模式：通过 API 启动服务器
+                api_url = self._cfg("launcher_api_url", "http://127.0.0.1:8765")
+                self.launcher_api = LauncherAPIClient(api_url)
+                
+                # 检查 API 连接
+                if not await asyncio.to_thread(self.launcher_api.ping):
+                    logger.error("无法连接到启动器 API: %s", api_url)
+                    return
+                
+                logger.info("已连接到启动器 API")
+                
+                # 获取服务器状态
+                status = await asyncio.to_thread(self.launcher_api.get_status)
+                if not status.get("running"):
+                    # 服务器未运行，尝试启动
+                    logger.info("通过启动器 API 启动服务器...")
+                    result = await asyncio.to_thread(self.launcher_api.start_server)
+                    if not result.get("success"):
+                        logger.error("启动器 API 启动服务器失败：%s", result.get("message"))
+                        return
+                    # 等待服务器就绪
+                    await asyncio.sleep(5)
+                    logger.info("服务器已通过启动器 API 启动")
+                else:
+                    logger.info("服务器已在运行中")
+            
             # 服务器刚起好时登录态可能未就绪，重试几次
             err = None
             for attempt in range(1, 4):

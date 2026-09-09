@@ -2,10 +2,16 @@
   "server_mode": {
     "description": "服务器模式",
     "type": "string",
-    "hint": "local=插件自动下载并运行本地 Paper 服务器（机器人进 localhost）；remote=连接你填写的远程服务器地址。",
-    "options": ["local", "remote"],
-    "labels": ["本地自建服务器", "远程服务器"],
+    "hint": "local=插件自动下载并运行本地 Paper 服务器；remote=连接远程服务器地址；launcher_api=通过启动器 HTTP API 远程控制。",
+    "options": ["local", "remote", "launcher_api"],
+    "labels": ["本地自建服务器", "远程服务器", "启动器 API 模式"],
     "default": "local"
+  },
+  "launcher_api_url": {
+    "description": "启动器 API 地址（launcher_api 模式）",
+    "type": "string",
+    "hint": "启动器的 HTTP API URL，例如 http://192.168.1.100:8765",
+    "default": "http://127.0.0.1:8765"
   },
   "bot_username": {
     "description": "机器人游戏内名字（离线账号名）",

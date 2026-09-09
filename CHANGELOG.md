@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 (2026-09-09)
+
+### 新增功能
+
+#### 启动器 API 集成
+- **新增第三种服务器模式：`launcher_api`**
+  - 通过 [AstrBot Minecraft 启动器](https://github.com/iownmmiku/astrbot-minecraft-launcher) 的 HTTP API 远程控制服务器
+  - 插件和启动器可以部署在不同电脑上
+  - 插件可以通过 API 启动/停止服务器、发送命令、查询状态
+- 新增 `launcher_api_client.py` 模块
+  - `LauncherAPIClient` 类实现完整的启动器 API 客户端
+  - 支持：ping、获取状态、启动/停止服务器、发送命令、下载版本
+- 新增配置项 `launcher_api_url`（默认 `http://127.0.0.1:8765`）
+
+### 改进
+- 插件现在支持三种服务器模式：
+  1. **local** - 插件自建本地 Paper 服务器
+  2. **remote** - 连接远程服务器
+  3. **launcher_api** - 通过启动器 API 远程控制（NEW）
+- `_auto_start` 方法增强：自动检测模式并通过 API 启动服务器
+- `_bot_target` 方法增强：launcher_api 模式自动解析服务器地址
+
+### 文档
+- README 更新：详细说明三种服务器模式的使用场景和配置
+- 添加启动器 API 模式配置步骤
+
+---
+
 ## 0.2.0 (2026-09-09)
 
 四大优化方向全面提升机器人流畅性与智能性。

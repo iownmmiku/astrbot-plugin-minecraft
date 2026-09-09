@@ -14,7 +14,7 @@ desc: |
 
   技术栈：纯 Python + mcproto 协议库（零 Node 依赖），目标协议 Minecraft 1.20.1 (protocol 763)。
   注意：机器人以离线（非正版）账号进服，仅支持未开启正版验证的服务器。
-version: 0.1.0
+version: 0.3.0
 author: iownmmiku
 repo: https://github.com/iownmmiku/astrbot_plugin_minecraft
 astrbot_version: ">=4.17,<5"

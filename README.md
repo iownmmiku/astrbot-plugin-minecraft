@@ -31,7 +31,8 @@ WebUI 插件配置页，关键项：
 
 | 配置 | 说明 | 默认 |
 |---|---|---|
-| `server_mode` | `local`=插件自建本地服；`remote`=连接你填的地址 | `local` |
+| `server_mode` | `local`=插件自建本地服；`remote`=连接你填的地址；`launcher_api`=通过启动器 API 远程控制 | `local` |
+| `launcher_api_url` | 启动器 API 地址（launcher_api 模式） | `http://127.0.0.1:8765` |
 | `bot_username` | 机器人游戏内名字（离线账号） | `AstrBot` |
 | `remote_host` / `remote_port` | 远程模式地址 | `127.0.0.1:25565` |
 | `local_port` / `local_motd` | 本地服端口 / MOTD | `25565` |
@@ -46,7 +47,34 @@ WebUI 插件配置页，关键项：
 | `auto_eat_threshold` | 自动进食饥饿值阈值 | 10 |
 | `auto_flee_enabled` | 自动逃离接近的实体 | 关 |
 
-### 3. 进服
+### 3. 三种服务器模式
+
+#### 模式 1：本地自建服务器（local）
+- 插件自动下载 Paper 1.20.1 服务器
+- 自动启动和管理服务器进程
+- 适合：开发调试、单机测试
+
+#### 模式 2：远程服务器（remote）
+- 连接到已有的 Minecraft 服务器
+- 填写服务器 IP 和端口
+- 适合：连接朋友的服务器、公共服务器
+
+#### 模式 3：启动器 API 模式（launcher_api）**NEW!**
+- 通过 [AstrBot Minecraft 启动器](https://github.com/iownmmiku/astrbot-minecraft-launcher) 的 HTTP API 远程控制
+- 插件和启动器可以在不同电脑上
+- 插件可以通过 API 启动/停止服务器、发送命令
+- 适合：生产环境、服务器分离部署
+
+**启动器 API 模式配置步骤：**
+1. 在服务器电脑上运行 AstrBot Minecraft 启动器
+2. 启动器中进入「远程访问」页面，启动 API 服务
+3. 记下显示的 URL（如 `http://192.168.1.100:8765`）
+4. 在插件配置中：
+   - `server_mode` 选择 `launcher_api`
+   - `launcher_api_url` 填写启动器的 API URL
+5. 插件将通过 API 自动管理服务器
+
+### 4. 进服
 
 本地模式开箱即用：启用插件后自动下载 Paper 1.20.1（首次约 43MB）、起服、进服。
 也可手动控制：
