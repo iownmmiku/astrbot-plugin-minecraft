@@ -1,0 +1,111 @@
+{
+  "server_mode": {
+    "description": "服务器模式",
+    "type": "string",
+    "hint": "local=插件自动下载并运行本地 Paper 服务器（机器人进 localhost）；remote=连接你填写的远程服务器地址。",
+    "options": ["local", "remote"],
+    "labels": ["本地自建服务器", "远程服务器"],
+    "default": "local"
+  },
+  "bot_username": {
+    "description": "机器人游戏内名字（离线账号名）",
+    "type": "string",
+    "hint": "进服时使用的玩家名，仅支持离线模式服务器；避免与真实玩家重名。",
+    "default": "AstrBot"
+  },
+  "remote_host": {
+    "description": "远程服务器地址（remote 模式）",
+    "type": "string",
+    "hint": "服务器 IP 或域名，例如 play.example.com",
+    "default": "127.0.0.1"
+  },
+  "remote_port": {
+    "description": "远程服务器端口（remote 模式）",
+    "type": "int",
+    "hint": "Minecraft Java 版端口，默认 25565",
+    "default": 25565
+  },
+  "local_version": {
+    "description": "本地服务器版本",
+    "type": "string",
+    "hint": "固定为 1.20.1（机器人协议仅支持该版本）",
+    "default": "1.20.1"
+  },
+  "local_port": {
+    "description": "本地服务器端口",
+    "type": "int",
+    "default": 25565
+  },
+  "local_motd": {
+    "description": "本地服务器 MOTD（服务器列表显示的名字）",
+    "type": "string",
+    "hint": "可用 § 符号添加颜色，例如 §a我的世界 §7- AstrBot 机器人服",
+    "default": "AstrBot Minecraft"
+  },
+  "java_path": {
+    "description": "Java 可执行文件路径（留空自动检测）",
+    "type": "string",
+    "hint": "本地起服需要 Java 17+。留空时依次尝试 PATH 与本机常见安装位置；指定后优先使用，例如 C:\\Program Files\\Zulu\\zulu-21\\bin\\java.exe",
+    "default": ""
+  },
+  "auto_connect": {
+    "description": "插件加载后自动连接服务器",
+    "type": "bool",
+    "hint": "开启后插件启动即自动起服（local 模式）并让机器人进服；关闭则需手动 /mc 起服 /mc 连接。",
+    "default": true
+  },
+  "auto_reply_in_game": {
+    "description": "游戏内 @机器人 时由 LLM 回复",
+    "type": "bool",
+    "hint": "开启后，游戏内玩家喊到机器人名字时，会用 AstrBot 当前 LLM 生成一句回复并在游戏内说出。",
+    "default": true
+  },
+  "max_reconnect_times": {
+    "description": "断线自动重连最大次数",
+    "type": "int",
+    "hint": "断线后指数退避重连，超过该次数停止；0 表示不自动重连。",
+    "default": 5
+  },
+  "mine_distance": {
+    "description": "挖掘最大距离（方块）",
+    "type": "int",
+    "hint": "机器人距离目标方块超过该值时先走近再挖。",
+    "default": 4
+  },
+  "enable_action_queue": {
+    "description": "启用异步动作队列",
+    "type": "bool",
+    "hint": "开启后 LLM 工具立即返回 action_id，动作在后台排队执行；关闭则保持原有的阻塞等待行为。",
+    "default": true
+  },
+  "enable_autonomous_behaviors": {
+    "description": "启用自主行为系统",
+    "type": "bool",
+    "hint": "机器人自动避险、进食、逃离怪物等。",
+    "default": true
+  },
+  "auto_eat_threshold": {
+    "description": "自动进食饥饿值阈值",
+    "type": "int",
+    "hint": "饥饿值低于此值时尝试自动进食（需要背包系统，当前仅记录日志）。",
+    "default": 10
+  },
+  "auto_flee_enabled": {
+    "description": "自动逃离接近的实体",
+    "type": "bool",
+    "hint": "检测到实体靠近时自动向反方向移动。",
+    "default": false
+  },
+  "enable_pathfinding": {
+    "description": "启用智能寻路",
+    "type": "bool",
+    "hint": "使用 A* 算法规划路径绕过障碍物；关闭则使用直线移动。",
+    "default": true
+  },
+  "pathfinding_max_cost": {
+    "description": "寻路最大代价阈值",
+    "type": "int",
+    "hint": "A* 寻路代价超过此值时放弃寻路改用直线移动。",
+    "default": 1000
+  }
+}

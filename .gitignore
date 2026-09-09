@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+
+# 测试文件
+.*.py
+.*_test.py
+*.log
+*_out.log
+*_full.log
+
+# 临时和缓存
+cache/
+logs/
+.decomp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 插件运行数据
+libraries/
+plugins/
+versions/
+
+# 项目文档
+PROJECT_COMPLETE.md

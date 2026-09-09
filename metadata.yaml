@@ -1,0 +1,27 @@
+name: astrbot_plugin_minecraft
+display_name: Minecraft 机器人游玩
+short_desc: 让 AstrBot 机器人以玩家身份进服游玩 Minecraft（双向聊天、移动、挖掘、跟随、LLM 自主驱动）
+desc: |
+  让 AstrBot 的机器人以真实游戏客户端身份进入 Minecraft 服务器「游玩」：
+
+  - 双向聊天桥：QQ 群聊 ↔ 游戏内聊天实时互通（`/mc 订阅`）
+  - 真实进服：机器人登录进服，可移动、挖掘、看向、跟随玩家
+  - LLM 自主驱动：注册 mc_status / mc_move / mc_mine / mc_follow / mc_look / mc_chat / mc_players
+    七个工具，AI 能自主决定「去哪里、挖什么、说什么」
+  - 服务器双模式：一键自建本地 Paper 1.20.1 服务器（自动下载/起服/崩溃重启），
+    或填写远程服务器地址直连
+  - 断线自动重连，插件卸载优雅退出
+
+  技术栈：纯 Python + mcproto 协议库（零 Node 依赖），目标协议 Minecraft 1.20.1 (protocol 763)。
+  注意：机器人以离线（非正版）账号进服，仅支持未开启正版验证的服务器。
+version: 0.1.0
+author: iownmmiku
+repo: https://github.com/iownmmiku/astrbot_plugin_minecraft
+astrbot_version: ">=4.17,<5"
+support_platforms: []
+tags:
+  - Minecraft
+  - 游戏
+  - 聊天桥接
+  - LLM工具
+  - 机器人
