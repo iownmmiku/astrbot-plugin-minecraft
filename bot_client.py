@@ -116,7 +116,17 @@ def unpack_position(value: int) -> tuple[int, int, int]:
     return x, y, z
 
 
-# 常见系统消息的 translate 键 → 中文模板（%s 为 with 参数）
+# 常见 1.20.1 物品 ID（用于目标系统和状态展示）
+ITEM_NAMES = {
+    1: "stone", 4: "cobblestone", 5: "oak_planks", 17: "oak_log",
+    20: "glass", 260: "apple", 263: "coal", 264: "diamond", 265: "iron_ingot",
+    266: "gold_ingot", 268: "wooden_sword", 270: "wooden_pickaxe", 274: "stone_pickaxe",
+    278: "diamond_pickaxe", 297: "bread", 320: "cooked_porkchop", 350: "cooked_fish",
+    391: "carrot", 392: "potato", 393: "baked_potato", 424: "cooked_mutton",
+    425: "cooked_chicken", 437: "beetroot", 17: "oak_log", 162: "dark_oak_log",
+}
+
+
 TRANSLATE_MAP = {
     "multiplayer.player.joined": "%s 加入了游戏",
     "multiplayer.player.left": "%s 离开了游戏",
@@ -1386,8 +1396,17 @@ class MCBot:
             "is_dead": self.is_dead,
             "lifecycle_state": self.lifecycle_state,
             "inventory": self.inventory,
+            "inventory_named": self.inventory_named(),
             "players": sorted(self.players.values()),
         }
+
+    def inventory_named(self) -> dict[str, int]:
+        """返回按物品名称聚合的库存，供目标系统使用。"""
+        result: dict[str, int] = {}
+        for slot in self.inventory.values():
+            name = ITEM_NAMES.get(slot.get("item_id"), f"item_{slot.get('item_id')}")
+            result[name] = result.get(name, 0) + int(slot.get("count", 0))
+        return result
 
     def player_names(self) -> list[str]:
         return sorted(self.players.values())
