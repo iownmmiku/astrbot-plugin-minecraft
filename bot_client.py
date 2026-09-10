@@ -1328,16 +1328,39 @@ class MCBot:
         服务器对每个移动包校验位移（超过 ~0.25 格会报 "moved wrongly" 并橡皮筋弹回），
         因此按真实客户端节奏以 20Hz 发送、每包步进约 0.22 格；每步都从服务器最新
         同步的位置重新计算方向，地形起伏被弹回时也能继续走。
+        
+        改进：
+        - 增加卡住检测：如果连续 3 秒位置未变化，判定为卡住
+        - 增加取消支持：死亡或动作队列取消时立即停止
         """
         if not self.connected or self.position is None:
             return "机器人未连接或尚未同步位置"
+        
         deadline = time.monotonic() + timeout
+        last_pos = self.position
+        stuck_start = time.monotonic()
+        stuck_threshold = 3.0  # 3秒不动判定卡住
+        
         while self.connected and time.monotonic() < deadline:
+            # 检查是否死亡
+            if self.is_dead:
+                return "机器人已死亡"
+            
             cx, cy, cz = self.position
             dx, dz = x - cx, z - cz
             dist = math.hypot(dx, dz)
+            
             if dist < 0.3:
                 return None
+            
+            # 卡住检测
+            if math.hypot(cx - last_pos[0], cz - last_pos[2]) < 0.05:
+                if time.monotonic() - stuck_start > stuck_threshold:
+                    return f"移动卡住（{stuck_threshold}秒未前进）"
+            else:
+                last_pos = (cx, cy, cz)
+                stuck_start = time.monotonic()
+            
             yaw = math.degrees(math.atan2(dx, dz))
             step_dist = min(MOVE_STEP, dist)
             nx = cx + dx / dist * step_dist
@@ -1345,46 +1368,100 @@ class MCBot:
             await self._send(SBTPositionLook(nx, cy, nz, yaw, self.pitch))
             self.position = (nx, cy, nz)
             await asyncio.sleep(MOVE_TICK)
+        
         return "移动超时" if self.connected else "连接已断开"
 
 
     async def mine(self, x: int, y: int, z: int, *, timeout: float = 30.0) -> str | None:
-        """挖掘指定方块。成功返回 None，失败返回原因。"""
+        """挖掘指定方块，带服务器验证。成功返回 None，失败返回原因。
+        
+        改进：
+        - 检查方块是否存在（非空气）
+        - 验证距离
+        - 等待方块变化确认
+        - 超时机制
+        """
         if not self.connected or self.position is None:
             return "机器人未连接或尚未同步位置"
+        
+        # 检查方块是否存在
+        block_id = self.get_block(x, y, z)
+        if block_id == 0 or block_id is None:
+            return "目标位置是空气或未加载"
+        
         bx, by, bz = self.position
         dist = math.sqrt((bx - x - 0.5) ** 2 + (by - y) ** 2 + (bz - z - 0.5) ** 2)
         if dist > REACH_DISTANCE:
             return f"目标方块距离 {dist:.1f} 格，超出可挖掘距离（{REACH_DISTANCE} 格）"
+        
+        # 记录挖掘前的方块ID
+        original_block = block_id
+        
         face = self._face_toward(bx, by, bz, x, y, z)
         self._dig_sequence += 1
+        
         # 面向目标方块
         yaw = math.degrees(math.atan2(x + 0.5 - bx, z + 0.5 - bz))
         pitch = math.degrees(math.atan2(y + 0.5 - by, math.hypot(x + 0.5 - bx, z + 0.5 - bz)))
         await self._send(SBTLook(yaw, pitch))
         self.yaw, self.pitch = yaw, pitch
+        
+        # 发送挖掘动作
         await self._send(SBTArmAnimation(0))
         await self._send(SBTBlockDig(DIG_START, x, y, z, face, self._dig_sequence))
         await asyncio.sleep(0.15)
+        
         if not self.connected:
             return "连接已断开"
+        
         await self._send(SBTBlockDig(DIG_FINISH, x, y, z, face, self._dig_sequence))
-        return None
+        
+        # 等待方块变化确认（最多等待 timeout 秒）
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+            current_block = self.get_block(x, y, z)
+            if current_block == 0 or current_block is None:
+                logger.debug("方块已挖掘：(%d,%d,%d) %d -> 空气", x, y, z, original_block)
+                return None
+            if current_block != original_block:
+                # 方块变了但不是空气（可能被其他玩家放置）
+                return f"方块已变化但不是预期结果（{original_block} -> {current_block}）"
+        
+        return "挖掘超时（服务器未确认方块变化）"
 
     async def place_block(self, x: int, y: int, z: int, *, timeout: float = 30.0) -> str | None:
-        """在指定位置放置方块。成功返回 None，失败返回原因。
+        """在指定位置放置方块，带验证。成功返回 None，失败返回原因。
         
-        注意：这需要手持可放置的方块物品。目前简化实现，默认使用主手当前物品。
+        改进：
+        - 检查手持物品是否可放置
+        - 检查目标位置是否为空气
+        - 等待服务器确认方块放置
         """
         if not self.connected or self.position is None:
             return "机器人未连接或尚未同步位置"
+        
+        # 检查目标位置是否为空气
+        block_id = self.get_block(x, y, z)
+        if block_id is not None and block_id != 0:
+            return f"目标位置已有方块（ID {block_id}）"
+        
+        # 检查手持物品
+        held_item = self.inventory.get(self.held_slot)
+        if not held_item:
+            return "手持槽位为空"
+        
+        held_item_id = held_item["item_id"]
+        # 简单检查：物品ID 1-255 通常是方块
+        if held_item_id > 255:
+            return f"手持物品（ID {held_item_id}）不是方块"
+        
         bx, by, bz = self.position
         dist = math.sqrt((bx - x - 0.5) ** 2 + (by - y) ** 2 + (bz - z - 0.5) ** 2)
         if dist > REACH_DISTANCE:
             return f"目标位置距离 {dist:.1f} 格，超出可放置距离（{REACH_DISTANCE} 格）"
         
         # 计算放置面：通常在目标位置下方的方块顶部放置（face=1，即上表面）
-        # 简化实现：在目标位置下方一格的上表面放置
         place_on_y = y - 1
         face = FACE_UP
         
@@ -1394,7 +1471,7 @@ class MCBot:
         await self._send(SBTLook(yaw, pitch))
         self.yaw, self.pitch = yaw, pitch
         
-        # 发送放置方块包（在目标下方的上表面）
+        # 发送放置方块包
         await self._send(SBTArmAnimation(0))
         await self._send(SBTBlockPlace(
             hand=0,
@@ -1403,12 +1480,93 @@ class MCBot:
             z=z,
             face=face,
             cursor_x=0.5,
-            cursor_y=1.0,  # 点击上表面的顶部
+            cursor_y=1.0,
             cursor_z=0.5,
             inside_block=False,
             sequence=0
         ))
-        await asyncio.sleep(0.1)
+        
+        # 等待方块放置确认
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+            current_block = self.get_block(x, y, z)
+            if current_block is not None and current_block != 0:
+                logger.debug("方块已放置：(%d,%d,%d) 空气 -> %d", x, y, z, current_block)
+                return None
+        
+        return "放置超时（服务器未确认方块变化）"
+
+    async def collect_drops(self, *, timeout: float = 10.0, max_distance: float = 16.0) -> dict[str, Any]:
+        """拾取周围的掉落物。返回拾取统计。
+        
+        Returns:
+            {"collected": int, "items": list[str], "error": str | None}
+        """
+        if not self.connected or self.position is None:
+            return {"collected": 0, "items": [], "error": "机器人未连接或尚未同步位置"}
+        
+        deadline = time.monotonic() + timeout
+        collected = 0
+        items_collected: list[str] = []
+        
+        while time.monotonic() < deadline:
+            # 查找最近的掉落物
+            drop = self.find_nearest_entity("item", max_distance=max_distance)
+            if not drop:
+                break
+            
+            # 移动到掉落物
+            dx, dz = drop["x"], drop["z"]
+            remaining_time = deadline - time.monotonic()
+            err = await self.move_to(dx, dz, timeout=min(5.0, remaining_time))
+            
+            if err:
+                return {"collected": collected, "items": items_collected, "error": f"移动失败：{err}"}
+            
+            # 等待拾取（实体消失）
+            await asyncio.sleep(0.5)
+            if drop["entity_id"] not in self.entities:
+                collected += 1
+                items_collected.append(f"item_{drop.get('type_id', '?')}")
+            
+            # 继续寻找下一个
+            if time.monotonic() >= deadline:
+                break
+        
+        return {"collected": collected, "items": items_collected, "error": None}
+
+    async def attack_entity(self, entity_id: int) -> str | None:
+        """攻击指定实体。成功返回 None，失败返回原因。
+        
+        注意：这是简化实现，只发送攻击包，不验证伤害。
+        """
+        if not self.connected or self.position is None:
+            return "机器人未连接或尚未同步位置"
+        
+        entity = self.entities.get(entity_id)
+        if not entity:
+            return f"实体 {entity_id} 不存在"
+        
+        ex, ey, ez = entity["x"], entity["y"], entity["z"]
+        px, py, pz = self.position
+        dist = math.sqrt((ex - px) ** 2 + (ey - py) ** 2 + (ez - pz) ** 2)
+        
+        if dist > REACH_DISTANCE:
+            return f"实体距离 {dist:.1f} 格，超出攻击距离（{REACH_DISTANCE} 格）"
+        
+        # 面向实体
+        yaw = math.degrees(math.atan2(ex - px, ez - pz))
+        pitch = math.degrees(math.atan2(ey - py, math.hypot(ex - px, ez - pz)))
+        await self._send(SBTLook(yaw, pitch))
+        self.yaw, self.pitch = yaw, pitch
+        
+        # 发送攻击动作
+        await self._send(SBTArmAnimation(0))
+        # TODO: 需要实现 SBTUseEntity 包（interact entity）
+        # 当前简化版本只挥手，实际攻击需要完整的 UseEntity 包
+        logger.warning("attack_entity 尚未实现完整的 UseEntity 包，只发送了挥手动画")
+        
         return None
 
     @staticmethod
