@@ -19,7 +19,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.core.star.star_tools import StarTools
 
 from .bot_client import MCBot
@@ -29,10 +29,51 @@ from .server_manager import LocalServerManager
 from .launcher_api_client import LauncherAPIClient
 from .goal_system_v2 import GoalManagerV2
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.3.0"
 PLUGIN_NAME = "astrbot_plugin_minecraft"
 
+# 只有机器人真的进服时才激活这些工具：否则任何会话的模型都会带着 16 个「挖方块」工具
+LLM_TOOL_NAMES: tuple[str, ...] = (
+    "mc_status",
+    "mc_move",
+    "mc_mine",
+    "mc_follow",
+    "mc_look",
+    "mc_chat",
+    "mc_players",
+    "mc_submit_move",
+    "mc_submit_mine",
+    "mc_submit_follow",
+    "mc_action_status",
+    "mc_cancel_action",
+    "mc_move_and_mine",
+    "mc_collect_nearby",
+    "mc_patrol",
+    "mc_return_spawn",
+)
+
 NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+HELP_TEXT = """【Minecraft 机器人指令】
+连接：
+  /mc连接 /mc断开        进服 / 退服
+  /mc状态                服务器与机器人状态
+  /mc玩家                在线玩家
+服务器（仅本地模式）：
+  /mc起服 /mc停服        启动 / 停止本地服务器
+聊天桥：
+  /mc订阅 /mc退订        把游戏内聊天推送到本会话
+  /mc说话 <内容>         以机器人身份在游戏内发言
+动作：
+  /mc移动 <x> <z>
+  /mc挖掘 <x> <y> <z>
+  /mc跟随 <玩家名>
+  /mc看向 <yaw> <pitch>
+人格与模型：
+  /mc人格                查看 / 切换人格来源
+  /mc模型                查看 / 切换模型来源
+自主游玩：
+  /mc目标                查看 / 启动 / 停止目标系统"""
 
 
 def _cmd_rest(event: AstrMessageEvent) -> str:
@@ -42,8 +83,36 @@ def _cmd_rest(event: AstrMessageEvent) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
-@register(PLUGIN_NAME, "iownmmiku", "让 AstrBot 机器人进服游玩 Minecraft", PLUGIN_VERSION)
+def _llm_response_text(resp: object) -> str | None:
+    """从 AstrBot 的 LLMResponse 里安全取出纯文本。
+
+    注意：`str(resp.result_chain)` 拿到的是 MessageChain 的 repr，
+    不是回复内容；必须走 `completion_text` / `get_plain_text()`。
+    """
+    if resp is None:
+        return None
+    if isinstance(resp, str):
+        return resp.strip() or None
+    text = getattr(resp, "completion_text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    chain = getattr(resp, "result_chain", None)
+    get_plain_text = getattr(chain, "get_plain_text", None)
+    if callable(get_plain_text):
+        plain = get_plain_text() or ""
+        if isinstance(plain, str) and plain.strip():
+            return plain.strip()
+    return None
+
+
 class MinecraftPlugin(Star):
+    """让 AstrBot 机器人以玩家身份进服游玩 Minecraft。
+
+    双向聊天桥（/mc订阅）、动作指令（移动/挖掘/跟随/看向）、以及一整套 mc_*
+    LLM 工具，让 AI 能自主决定去哪里、挖什么、说什么。
+    输入 /mc帮助 查看全部指令。
+    """
+
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.config = config or {}
@@ -54,139 +123,66 @@ class MinecraftPlugin(Star):
         self.bot: MCBot | None = None
         self.launcher_api: LauncherAPIClient | None = None
         self._connecting = False
+        self._connect_lock = asyncio.Lock()
         self._persona_obj: Persona | None = None
-        self._persona_choice_file = self.data_dir / "persona_choice.json"
+        self._persona_key = ""
+        self._persona_prompt_cache = ""
         self.goal_manager: GoalManagerV2 | None = None
+        # 后台任务统一登记，terminate 时一起取消（asyncio 只持弱引用，必须自己拿着）
+        self._bg_tasks: set[asyncio.Task] = set()
+        # LLM 工具是否已激活
+        # 工具默认是激活的，等 initialize() 里按进服状态对齐
+        self._tools_active = True
+        # 游戏内自动回复的节流状态
+        self._reply_cooldown: dict[str, float] = {}
+        self._reply_lock = asyncio.Lock()
 
     # ---------- 配置 ----------
     def _cfg(self, key: str, default=None):
         return self.config.get(key, default)
 
-    def _get_system_prompt(self) -> str:
-        """获取当前生效的系统提示词（人格）。
-        
-        优先级：
-        1. AstrBot 全局人格（persona_source = "astrbot_current"）
-        2. AstrBot 指定人格（persona_source = "astrbot_selected", astrbot_persona_id 配置）
-        3. 插件自定义人格（persona_source = "custom", persona_custom_desc 配置）
-        """
-        persona_source = self._cfg("persona_source", "astrbot_current")
-        
-        if persona_source == "astrbot_current":
-            # 使用 AstrBot 当前人格
-            try:
-                persona_manager = getattr(self.context, "persona_manager", None)
-                if persona_manager:
-                    current_persona = persona_manager.get_current()
-                    if current_persona:
-                        system_prompt = getattr(current_persona, "prompt", "") or getattr(current_persona, "description", "")
-                        if system_prompt:
-                            logger.info("使用 AstrBot 当前人格：%s", getattr(current_persona, "name", "未知"))
-                            return system_prompt
-            except Exception as e:  # noqa: BLE001
-                logger.debug("无法获取 AstrBot 当前人格：%s", e)
-        
-        elif persona_source == "astrbot_selected":
-            # 使用 AstrBot 指定人格
-            astrbot_persona_id = self._cfg("astrbot_persona_id", "")
-            if astrbot_persona_id:
-                try:
-                    persona_manager = getattr(self.context, "persona_manager", None)
-                    if persona_manager:
-                        persona = persona_manager.get(astrbot_persona_id)
-                        if persona:
-                            system_prompt = getattr(persona, "prompt", "") or getattr(persona, "description", "")
-                            if system_prompt:
-                                logger.info("使用 AstrBot 指定人格：%s", getattr(persona, "name", astrbot_persona_id))
-                                return system_prompt
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("无法获取 AstrBot 指定人格 %s：%s", astrbot_persona_id, e)
-        
-        # 降级到插件自定义人格
-        custom_desc = self._cfg("persona_custom_desc", "")
-        if custom_desc:
-            logger.info("使用插件自定义人格")
-            return custom_desc
-        
-        # 最终降级到默认
-        logger.info("使用插件默认人格")
-        return "你是一个 Minecraft 机器人，会自主游玩、采集资源、建造和探索。"
-
-    def _llm_model_override(self) -> str | None:
-        """获取独立模型配置（如果启用）。
-        
-        Returns:
-            模型名称字符串，或 None（跟随 AstrBot 默认模型）
-        """
-        model_source = self._cfg("model_source", "astrbot_default")
-        if model_source == "custom":
-            custom_model = self._cfg("custom_model", "")
-            if custom_model:
-                logger.debug("使用插件独立模型：%s", custom_model)
-                return custom_model
-        return None
-
     @property
     def _persona(self) -> Persona:
-        """当前人格：优先使用 AstrBot 全局人格配置，其次插件配置，最后 /mc人格 指令。"""
-        # 1. 尝试使用 AstrBot 全局人格配置
-        use_astrbot_persona = self._cfg("use_astrbot_persona", True)
-        if use_astrbot_persona:
-            try:
-                # 获取 AstrBot 的全局人格配置
-                persona_manager = getattr(self.context, "personas", None)
-                if persona_manager:
-                    current_persona = persona_manager.get_current()
-                    if current_persona:
-                        # 使用 AstrBot 的人格，但包装成插件的 Persona 格式
-                        # 注意：这里直接返回，不使用插件自己的人格系统
-                        logger.info("使用 AstrBot 全局人格：%s", getattr(current_persona, "name", "未知"))
-                        # 由于 AstrBot 人格系统和插件不完全兼容，暂时用描述文本
-                        # 后续可以更深度集成
-            except Exception as e:  # noqa: BLE001
-                logger.debug("无法获取 AstrBot 全局人格：%s", e)
-        
-        # 2. 使用插件配置的人格
-        persona_id = self._cfg("persona", "")
-        
-        # 3. 如果插件配置为空，尝试从指令保存的选择读取
-        if not persona_id:
-            try:
-                if self._persona_choice_file.exists():
-                    import json
-                    saved = json.loads(self._persona_choice_file.read_text(encoding="utf-8"))
-                    if saved.get("persona"):
-                        persona_id = saved["persona"]
-            except Exception:  # noqa: BLE001
-                pass
-        
-        # 4. 最终降级为默认人格
-        if not persona_id:
-            persona_id = "maid"
-        
-        if self._persona_obj is None or self._persona_obj.persona_id != persona_id:
+        """内置 Persona 对象（供空闲自言自语、心情文案使用）。
+
+        有 AstrBot 人格时就用它当人设，否则退到插件自定义文本 / 预设，
+        保证自言自语和 LLM 回复是同一个语气。
+        """
+        desc = (
+            self._persona_prompt_cache
+            or str(self._cfg("persona_custom_desc", "") or "")
+        ).strip()
+        persona_id = "custom" if desc else "maid"
+        cache_key = f"{persona_id}:{desc}"
+        if self._persona_obj is None or self._persona_key != cache_key:
             self._persona_obj = build_persona(
                 persona_id,
                 username=self._bot_username,
-                custom_desc=self._cfg("persona_custom_desc", ""),
+                custom_desc=desc,
             )
+            self._persona_key = cache_key
         return self._persona_obj
-
-    def _set_persona(self, persona_id: str) -> None:
-        """切换人格并持久化（下次连接自动生效）。"""
-        self.config["persona"] = persona_id
-        self._persona_obj = None
-        try:
-            import json
-            self._persona_choice_file.write_text(
-                json.dumps({"persona": persona_id}, ensure_ascii=False), encoding="utf-8"
-            )
-        except OSError:
-            pass
 
     @property
     def _bot_username(self) -> str:
         return self._cfg("bot_username", "AstrBot") or "AstrBot"
+
+    def _save_cfg(self, **values) -> None:
+        """写入插件配置并落盘（AstrBotConfig 支持 save_config）。"""
+        self.config.update(values)
+        save = getattr(self.config, "save_config", None)
+        if callable(save):
+            try:
+                save()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("保存插件配置失败：%s", exc)
+
+    def _persona_source(self) -> str:
+        """人格来源：default（AstrBot 当前）/ persona（AstrBot 指定）/ custom（插件自定义）。"""
+        source = str(self._cfg("persona_source", "default") or "default")
+        return {"astrbot_current": "default", "astrbot_selected": "persona"}.get(
+            source, source
+        )
 
     def _bot_target(self) -> tuple[str, int]:
         mode = self._cfg("server_mode", "local")
@@ -212,16 +208,22 @@ class MinecraftPlugin(Star):
     def _is_launcher_api(self) -> bool:
         return self._cfg("server_mode", "local") == "launcher_api"
 
-    # ---------- 生命周期 ----------
     async def initialize(self):
         """插件加载后自动调用；如需自动进服则启动后台任务。"""
+        await self._sync_llm_tools(False)  # 先藏起 mc_* 工具，等真的进服再放开
+        self._spawn(self._tool_sync_loop())
         if self._cfg("auto_connect", True):
-            asyncio.create_task(self._auto_start())
+            self._spawn(self._auto_start())
 
     async def terminate(self):
         """插件卸载/停用时优雅清理。"""
+        for task in list(self._bg_tasks):
+            task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+            self._bg_tasks.clear()
         if self.goal_manager:
-            await self.goal_manager.stop()
+            self.goal_manager.stop()  # 同步方法，不能 await
             self.goal_manager = None
         if self.bot:
             await self.bot.disconnect()
@@ -230,6 +232,59 @@ class MinecraftPlugin(Star):
             await self.server.stop()
             self.server = None
         logger.info("Minecraft 插件已停止")
+
+    # ---------- 后台任务与工具可见性 ----------
+    def _spawn(self, coro) -> asyncio.Task:
+        """登记后台任务：asyncio 只持弱引用，必须自己拿着，否则可能被 GC。"""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
+    async def _sync_llm_tools(self, active: bool) -> None:
+        """按进服状态激活/停用 mc_* 工具，避免污染无关会话的工具列表。"""
+        if not bool(self._cfg("manage_llm_tool_activation", True)):
+            return
+        if active == self._tools_active:
+            return
+        name = "activate_llm_tool_async" if active else "deactivate_llm_tool_async"
+        fn = getattr(self.context, name, None) or getattr(
+            self.context, name.replace("_async", ""), None
+        )
+        if fn is None:
+            return
+        for tool_name in LLM_TOOL_NAMES:
+            try:
+                result = fn(tool_name)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("切换工具 %s 状态失败：%s", tool_name, exc)
+        self._tools_active = active
+        logger.info(
+            "Minecraft LLM 工具已%s（%d 个）",
+            "激活" if active else "停用",
+            len(LLM_TOOL_NAMES),
+        )
+
+    async def _tool_sync_loop(self) -> None:
+        """周期性对齐「进服状态 ↔ 工具可见性」，顺便刷新人格缓存。"""
+        while True:
+            try:
+                await self._sync_llm_tools(bool(self.bot and self.bot.connected))
+                await self._refresh_persona_cache()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("同步 Minecraft 插件状态失败")
+            await asyncio.sleep(10)
+
+    async def _refresh_persona_cache(self) -> None:
+        """缓存当前生效的人格提示词（_persona 是同步属性，不能 await）。"""
+        try:
+            self._persona_prompt_cache = await self._system_prompt()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("刷新人格缓存失败：%s", exc)
 
     async def _auto_start(self) -> None:
         try:
@@ -306,8 +361,11 @@ class MinecraftPlugin(Star):
         """连接 bot；成功返回 None，失败返回原因。"""
         if self.bot is not None and self.bot.connected:
             return None
-        if self._connecting:
-            return "正在连接中，请稍候"
+        # 用锁保证并发调用（QQ 指令 + 自动重连）不会各连一条
+        async with self._connect_lock:
+            return await self._connect_bot_locked()
+
+    async def _connect_bot_locked(self) -> str | None:
         self._connecting = True
         try:
             host, port = self._bot_target()
@@ -355,6 +413,7 @@ class MinecraftPlugin(Star):
                 )
                 self.goal_manager.start()
                 logger.info("目标管理器 V2 已启动")
+            await self._sync_llm_tools(True)  # 进服后才把工具暴露给 LLM
             
             return None
         finally:
@@ -382,14 +441,16 @@ class MinecraftPlugin(Star):
         # 游戏内唤醒词检测 → LLM 回复（可选）
         if self._cfg("auto_reply_in_game", True) and sender:
             if self._should_reply_to_message(text):
-                asyncio.create_task(self._in_game_llm_reply(sender, text))
+                self._spawn(self._in_game_llm_reply(sender, text))
 
     def _should_reply_to_message(self, text: str) -> bool:
         """检查消息是否包含唤醒词或 @ 机器人。"""
         text_lower = text.lower()
         
-        # 默认唤醒词：机器人名字
+        # 默认唤醒词：机器人名字（list 或逗号分隔的字符串都接受）
         wake_words = self._cfg("mc_chat_wake_words", [])
+        if isinstance(wake_words, str):
+            wake_words = [w.strip() for w in re.split(r"[,，\s]+", wake_words) if w.strip()]
         if not wake_words:
             wake_words = [self._bot_username.lower()]
         
@@ -406,103 +467,42 @@ class MinecraftPlugin(Star):
 
     async def _on_mc_disconnect(self, reason: str, kicked: bool) -> None:
         logger.warning("机器人断开：%s", reason)
+        await self._sync_llm_tools(False)
         await self.bridge.broadcast(f"【MC】机器人已断开：{reason}")
-
-    # ---------- LLM ----------
-    def _get_system_prompt(self) -> str:
-        """获取当前生效的系统提示词（人格）。
-        
-        优先级：
-        1. AstrBot 全局人格（persona_source = "astrbot_current"）
-        2. AstrBot 指定人格（persona_source = "astrbot_selected", astrbot_persona_id 配置）
-        3. 插件自定义人格（persona_source = "custom", persona_custom_desc 配置）
-        4. 插件默认人格（降级）
-        """
-        source = self._cfg("persona_source", "astrbot_current")
-        
-        # 1. AstrBot 全局当前人格
-        if source == "astrbot_current":
-            try:
-                manager = getattr(self.context, "persona_manager", None)
-                if manager:
-                    current = manager.get_current()
-                    if current:
-                        prompt = getattr(current, "system_prompt", None) or getattr(current, "prompt", None)
-                        if prompt:
-                            logger.debug("使用 AstrBot 全局当前人格")
-                            return str(prompt)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("读取 AstrBot 全局人格失败：%s", exc)
-        
-        # 2. AstrBot 指定人格
-        elif source == "astrbot_selected":
-            try:
-                manager = getattr(self.context, "persona_manager", None)
-                if manager:
-                    pid = self._cfg("astrbot_persona_id", "")
-                    if pid:
-                        selected = manager.get_persona(pid)
-                        if selected:
-                            prompt = getattr(selected, "system_prompt", None) or getattr(selected, "prompt", None)
-                            if prompt:
-                                logger.debug("使用 AstrBot 指定人格：%s", pid)
-                                return str(prompt)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("读取 AstrBot 指定人格失败：%s", exc)
-        
-        # 3. 插件自定义人格
-        elif source == "custom":
-            custom_desc = self._cfg("persona_custom_desc", "")
-            if custom_desc:
-                logger.debug("使用插件自定义人格")
-                return custom_desc
-        
-        # 4. 降级到插件默认人格
-        logger.debug("降级到插件默认人格")
-        return self._persona.system_prompt()
-
-    def _llm_model_override(self) -> str | None:
-        """返回插件独立模型覆盖；默认跟随 AstrBot 当前模型。"""
-        if self._cfg("model_source", "default") == "custom":
-            return (self._cfg("llm_model", "") or "").strip() or None
-        return None
 
     async def _llm_chat(self, prompt: str, system_prompt: str | None = None) -> str | None:
         """统一 LLM 调用：优先使用 AstrBot 全局配置的模型和人格。"""
-        # 如果启用了 AstrBot 全局配置
-        use_astrbot_config = self._cfg("use_astrbot_config", True)
-        
-        # 如果没有指定 system_prompt，尝试使用 AstrBot 的人格配置
         if system_prompt is None:
-            system_prompt = self._get_system_prompt()
-        
-        # 优先使用 AstrBot 的模型配置
+            system_prompt = await self._system_prompt()
         model = self._llm_model_override()
-        
+
         try:
             provider = self.context.get_using_provider()
             if provider:
                 resp = await provider.text_chat(
-                    prompt=prompt, 
-                    contexts=[], 
+                    prompt=prompt,
+                    contexts=[],
                     model=model,
-                    system_prompt=system_prompt
+                    system_prompt=system_prompt,
                 )
-                if resp and resp.result_chain:
-                    return str(resp.result_chain)
+                text = _llm_response_text(resp)
+                if text:
+                    return text
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM 主路径失败：%s", exc)
-        
+
         try:
-            pid = self.context.get_current_chat_provider_id("")
-            # 降级路径不支持 system_prompt，直接拼进 prompt
+            provider_id = await self.context.get_current_chat_provider_id("")
             merged = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-            resp = await self.context.llm_generate(chat_provider_id=pid, prompt=merged)
-            if resp and resp.result_chain:
-                return str(resp.result_chain)
+            resp = await self.context.llm_generate(
+                chat_provider_id=provider_id, prompt=merged
+            )
+            text = _llm_response_text(resp)
+            if text:
+                return text
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM 降级路径失败：%s", exc)
-        
+
         return None
 
     async def _llm_text(self, prompt: str) -> str | None:
@@ -560,21 +560,45 @@ class MinecraftPlugin(Star):
         await self.bridge.broadcast(f"【{self._bot_username}】{text}")
 
     async def _in_game_llm_reply(self, sender: str, text: str) -> None:
-        """游戏内 LLM 回复（使用 AstrBot 的人格配置）。"""
-        try:
-            prompt = (
-                f"玩家 {sender} 在 Minecraft 世界里对你说：{text}\n"
-                f"请以「{self._bot_username}」的身份简短回应（30 字以内），"
-                "口语化，不要加引号和前缀。"
-            )
-            # 使用 AstrBot 的 system_prompt，而不是插件内置人格
-            reply = await self._llm_chat(prompt)
-            if reply and self.bot and self.bot.connected:
-                reply = reply.strip().strip('"""')
-                await self.bot.send_chat(reply[:100])
-                await self.bridge.broadcast(f"【MC】{self._bot_username}：{reply[:100]}")
-        except Exception:  # noqa: BLE001
-            logger.exception("游戏内 LLM 回复失败")
+        """游戏内 LLM 回复（带冷却与单飞保护，防止刷屏打爆 LLM 配额）。"""
+        if not self._reply_allowed(sender):
+            logger.debug("忽略 %s 的游戏内消息（冷却中）", sender)
+            return
+        if self._reply_lock.locked():
+            logger.debug("上一句游戏内回复还没说完，忽略 %s 的消息", sender)
+            return
+        async with self._reply_lock:
+            try:
+                prompt = (
+                    f"玩家 {sender} 在 Minecraft 世界里对你说：{text}\n"
+                    f"请以「{self._bot_username}」的身份简短回应（30 字以内），"
+                    "口语化，不要加引号和前缀。"
+                )
+                reply = await self._llm_chat(prompt)
+                if reply and self.bot and self.bot.connected:
+                    reply = reply.strip().strip('"').strip()
+                    await self.bot.send_chat(reply[:100])
+                    await self.bridge.broadcast(
+                        f"【MC】{self._bot_username}：{reply[:100]}"
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception("游戏内 LLM 回复失败")
+
+    def _reply_allowed(self, sender: str) -> bool:
+        """同一玩家在冷却时间内只回一次。"""
+        cooldown = float(self._cfg("in_game_reply_cooldown", 30) or 0)
+        if cooldown <= 0:
+            return True
+        now = time.time()
+        key = (sender or "").lower()
+        if now - self._reply_cooldown.get(key, 0.0) < cooldown:
+            return False
+        self._reply_cooldown[key] = now
+        if len(self._reply_cooldown) > 200:  # 顺手清理，别让字典无限长大
+            self._reply_cooldown = {
+                k: v for k, v in self._reply_cooldown.items() if now - v < cooldown
+            }
+        return True
 
     # ---------- 状态文本 ----------
     async def _status_text(self) -> str:
@@ -598,27 +622,93 @@ class MinecraftPlugin(Star):
             lines.append("机器人：未进服")
         
         # 添加人格和模型信息
-        persona_source = self._cfg("persona_source", "astrbot_current")
+        source = self._persona_source()
         persona_name = {
-            "astrbot_current": "AstrBot 全局",
-            "astrbot_selected": f"AstrBot 指定({self._cfg('astrbot_persona_id', '?')})",
-            "custom": "自定义"
-        }.get(persona_source, persona_source)
+            "default": "AstrBot 当前人格",
+            "persona": f"AstrBot 指定人格（{self._cfg('astrbot_persona_id', '') or '未配置'}）",
+            "custom": "插件自定义人格",
+        }.get(source, source)
         lines.append(f"人格来源：{persona_name}")
-        
-        model_source = self._cfg("model_source", "default")
-        if model_source == "custom":
-            model_name = f"独立({self._cfg('llm_model', '?')})"
+
+        if str(self._cfg("model_source", "default")) == "custom":
+            model_name = f"独立（{self._cfg('llm_model', '') or '未配置'}）"
         else:
             model_name = "跟随 AstrBot"
         lines.append(f"模型来源：{model_name}")
-        
+        lines.append(
+            "LLM 工具：" + ("已激活" if self._tools_active else "已停用（未进服）")
+        )
+
         return "\n".join(lines)
 
     def _require_bot(self) -> str | None:
         if self.bot is None or not self.bot.connected:
             return "机器人未进服，请先执行 /mc 连接"
         return None
+
+    async def _load_astrbot_persona_prompt(self) -> str | None:
+        """读取 AstrBot 人格提示词（v3 人格的 prompt 字段）。"""
+        manager = getattr(self.context, "persona_manager", None)
+        if manager is None:
+            return None
+        try:
+            if self._persona_source() == "persona":
+                persona_id = str(self._cfg("astrbot_persona_id", "") or "").strip()
+                if not persona_id:
+                    return None
+                persona = manager.get_persona_v3_by_id(persona_id)
+                if persona is None:
+                    # 旧版人格（数据库），是 async 的
+                    legacy = await manager.get_persona(persona_id)
+                    prompt = getattr(legacy, "prompt", None) or getattr(
+                        legacy, "system_prompt", None
+                    )
+                    return str(prompt).strip() or None
+            else:
+                persona = await manager.get_default_persona_v3(None)
+            if isinstance(persona, dict):
+                prompt = persona.get("prompt") or ""
+            else:
+                prompt = getattr(persona, "prompt", "") or getattr(
+                    persona, "system_prompt", ""
+                )
+            return str(prompt).strip() or None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("读取 AstrBot 人格失败：%s", exc)
+            return None
+
+    async def _system_prompt(self) -> str:
+        """当前生效的系统提示词。
+
+        1) persona_source=default → AstrBot 当前人格
+        2) persona_source=persona → AstrBot 指定人格（astrbot_persona_id）
+        3) persona_source=custom  → persona_custom_desc
+        任何一环缺失都逐级降级，最后落到插件内置人设。
+        """
+        source = self._persona_source()
+        if source in ("default", "persona"):
+            prompt = await self._load_astrbot_persona_prompt()
+            if prompt:
+                self._persona_prompt_cache = prompt
+                return prompt
+            if source == "persona":
+                logger.warning(
+                    "指定人格 %s 不可用，降级为插件内置人设",
+                    self._cfg("astrbot_persona_id", ""),
+                )
+        desc = str(self._cfg("persona_custom_desc", "") or "").strip()
+        self._persona_prompt_cache = desc
+        return desc or self._persona.system_prompt()
+
+    def _llm_model_override(self) -> str | None:
+        """插件独立模型；默认跟随 AstrBot 当前模型。"""
+        if str(self._cfg("model_source", "default")) == "custom":
+            return str(self._cfg("llm_model", "") or "").strip() or None
+        return None
+
+    @filter.command("mc帮助", alias={"mchelp"})
+    async def mc_help(self, event: AstrMessageEvent):
+        yield event.plain_result(HELP_TEXT)
 
     # ================= 指令集 =================
     @filter.command("mc状态", alias={"查服", "mcstatus"})
@@ -633,103 +723,101 @@ class MinecraftPlugin(Star):
         names = self.bot.player_names()
         yield event.plain_result("在线玩家：" + ("、".join(names) if names else "无"))
 
-    @filter.command("mc人格", alias={"人格", "mcpersona"})
+    @filter.command("mc人格", alias={"mcpersona"})
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def mc_persona(self, event: AstrMessageEvent):
-        """查看/切换人格来源（AstrBot 全局/指定/插件自定义）。"""
-        arg = _cmd_rest(event).strip().lower()
-        
-        if not arg:
-            # 显示当前配置
-            source = self._cfg("persona_source", "astrbot_current")
+        """查看/切换人格来源（AstrBot 当前 / AstrBot 指定 / 插件自定义）。"""
+        raw = _cmd_rest(event).strip()
+        parts = raw.split(None, 1)
+        head = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if not head:
+            source = self._persona_source()
             source_name = {
-                "astrbot_current": "AstrBot 全局当前人格",
-                "astrbot_selected": "AstrBot 指定人格",
-                "custom": "插件自定义人格"
+                "default": "AstrBot 当前人格",
+                "persona": "AstrBot 指定人格",
+                "custom": "插件自定义人格",
             }.get(source, source)
-            
             info = [f"人格来源：{source_name}"]
-            
-            if source == "astrbot_selected":
-                pid = self._cfg("astrbot_persona_id", "")
-                info.append(f"指定人格 ID：{pid or '（未配置）'}")
+            if source == "persona":
+                info.append(f"指定人格：{self._cfg('astrbot_persona_id', '') or '（未配置）'}")
             elif source == "custom":
-                desc = self._cfg("persona_custom_desc", "")
+                desc = str(self._cfg("persona_custom_desc", "") or "")
                 preview = (desc[:50] + "...") if len(desc) > 50 else desc
                 info.append(f"自定义内容：{preview or '（未配置）'}")
-            
             yield event.plain_result(
-                "\n".join(info) + 
-                "\n\n用法：\n"
-                "/mc人格 astrbot - 使用 AstrBot 全局当前人格\n"
-                "/mc人格 select <ID> - 使用 AstrBot 指定人格\n"
-                "/mc人格 custom <描述> - 使用自定义人格"
+                "\n".join(info)
+                + "\n\n用法：\n"
+                "/mc人格 astrbot —— 跟随 AstrBot 当前人格\n"
+                "/mc人格 select <人格名> —— 使用 AstrBot 指定人格\n"
+                "/mc人格 custom <描述> —— 使用插件自定义人格"
             )
             return
-        
-        # 切换配置
-        if arg == "astrbot":
-            self.config["persona_source"] = "astrbot_current"
-            self.config.pop("astrbot_persona_id", None)
-            yield event.plain_result("已切换为 AstrBot 全局当前人格")
-        elif arg.startswith("select "):
-            pid = _cmd_rest(event).strip()[7:].strip()
-            if not pid:
-                yield event.plain_result("请指定人格 ID：/mc人格 select <ID>")
+
+        if head in ("astrbot", "default", "current"):
+            self._save_cfg(persona_source="default")
+            self._persona_obj = None
+            self._persona_prompt_cache = ""
+            yield event.plain_result("已切换为 AstrBot 当前人格")
+        elif head == "select":
+            if not rest:
+                yield event.plain_result("请指定人格名：/mc人格 select <人格名>")
                 return
-            self.config["persona_source"] = "astrbot_selected"
-            self.config["astrbot_persona_id"] = pid
-            yield event.plain_result(f"已切换为 AstrBot 指定人格：{pid}")
-        elif arg.startswith("custom "):
-            desc = _cmd_rest(event).strip()[7:].strip()
-            if not desc:
+            self._save_cfg(persona_source="persona", astrbot_persona_id=rest)
+            self._persona_obj = None
+            self._persona_prompt_cache = ""
+            yield event.plain_result(f"已切换为 AstrBot 指定人格：{rest}")
+        elif head == "custom":
+            if not rest:
                 yield event.plain_result("请提供人格描述：/mc人格 custom <描述>")
                 return
-            self.config["persona_source"] = "custom"
-            self.config["persona_custom_desc"] = desc
-            yield event.plain_result(f"已切换为自定义人格（{len(desc)} 字）")
+            self._save_cfg(persona_source="custom", persona_custom_desc=rest)
+            self._persona_obj = None
+            self._persona_prompt_cache = ""
+            yield event.plain_result(f"已切换为自定义人格（{len(rest)} 字）")
         else:
-            yield event.plain_result("未知命令，用法：/mc人格 [astrbot|select <ID>|custom <描述>]")
-
-    @filter.command("mc模型", alias={"模型", "mcmodel"})
-    async def mc_model(self, event: AstrMessageEvent):
-        """查看/切换模型来源（跟随 AstrBot / 插件独立）。"""
-        arg = _cmd_rest(event).strip().lower()
-        
-        if not arg:
-            # 显示当前配置
-            source = self._cfg("model_source", "default")
-            source_name = "跟随 AstrBot 当前模型" if source == "default" else "插件独立模型"
-            
-            info = [f"模型来源：{source_name}"]
-            
-            if source == "custom":
-                model = self._cfg("llm_model", "")
-                info.append(f"独立模型：{model or '（未配置）'}")
-            
             yield event.plain_result(
-                "\n".join(info) + 
-                "\n\n用法：\n"
-                "/mc模型 default - 跟随 AstrBot 当前模型\n"
-                "/mc模型 custom <模型名> - 使用独立模型"
+                "未知参数，用法：/mc人格 [astrbot|select <人格名>|custom <描述>]"
+            )
+
+    @filter.command("mc模型", alias={"mcmodel"})
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def mc_model(self, event: AstrMessageEvent):
+        """查看/切换模型来源（跟随 AstrBot / 插件独立模型）。"""
+        raw = _cmd_rest(event).strip()
+        parts = raw.split(None, 1)
+        head = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if not head:
+            source = str(self._cfg("model_source", "default"))
+            source_name = "跟随 AstrBot 当前模型" if source == "default" else "插件独立模型"
+            info = [f"模型来源：{source_name}"]
+            if source == "custom":
+                info.append(f"独立模型：{self._cfg('llm_model', '') or '（未配置）'}")
+            yield event.plain_result(
+                "\n".join(info)
+                + "\n\n用法：\n"
+                "/mc模型 default —— 跟随 AstrBot 当前模型\n"
+                "/mc模型 custom <模型名> —— 使用独立模型"
             )
             return
-        
-        # 切换配置
-        if arg == "default":
-            self.config["model_source"] = "default"
-            self.config.pop("llm_model", None)
+
+        if head in ("default", "astrbot"):
+            self._save_cfg(model_source="default")
             yield event.plain_result("已切换为跟随 AstrBot 当前模型")
-        elif arg.startswith("custom "):
-            model = _cmd_rest(event).strip()[7:].strip()
-            if not model:
+        elif head == "custom":
+            if not rest:
                 yield event.plain_result("请指定模型名：/mc模型 custom <模型名>")
                 return
-            self.config["model_source"] = "custom"
-            self.config["llm_model"] = model
-            yield event.plain_result(f"已切换为独立模型：{model}")
+            self._save_cfg(model_source="custom", llm_model=rest)
+            yield event.plain_result(f"已切换为独立模型：{rest}")
         else:
-            yield event.plain_result("未知命令，用法：/mc模型 [default|custom <模型名>]")
-    
+            yield event.plain_result("未知参数，用法：/mc模型 [default|custom <模型名>]")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+
     @filter.command("mc目标", alias={"目标", "mcgoal"})
     async def mc_goal(self, event: AstrMessageEvent):
         """查看/控制目标系统（让机器人知道自己想干什么）。"""
@@ -794,6 +882,8 @@ class MinecraftPlugin(Star):
             "/mc目标 停止 - 停止目标系统"
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+
     @filter.command("mc起服")
     async def mc_start_server(self, event: AstrMessageEvent):
         if not self._is_local:
@@ -817,6 +907,8 @@ class MinecraftPlugin(Star):
             yield event.plain_result("本地服务器已就绪，可执行 /mc 连接 进服")
         else:
             yield event.plain_result("服务器启动超时，请查看日志")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
 
     @filter.command("mc停服")
     async def mc_stop_server(self, event: AstrMessageEvent):
@@ -842,6 +934,7 @@ class MinecraftPlugin(Star):
             yield event.plain_result("机器人未进服")
             return
         await self.bot.disconnect()
+        await self._sync_llm_tools(False)
         yield event.plain_result("机器人已退出服务器")
 
     @filter.command("mc订阅", alias={"订阅mc"})
@@ -1044,8 +1137,6 @@ class MinecraftPlugin(Star):
                 result += f"。当前在线玩家：{online}"
         
         yield event.plain_result(result)
-        r = await self.bot.follow(player)
-        yield event.plain_result(f"机器人已跟随玩家「{player}」" if r is None else f"跟随失败：{r}")
 
     @filter.llm_tool(name="mc_look")
     async def llm_mc_look(self, event: AstrMessageEvent, yaw: float, pitch: float):

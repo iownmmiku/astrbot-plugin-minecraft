@@ -79,6 +79,17 @@ def _http_download(url: str, dest: Path, timeout: float = 120) -> None:
             fh.write(chunk)
 
 
+def _file_sha256(path: Path) -> str:
+    """计算文件的 sha256（用于校验下载的服务器核心）。"""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _java_candidates(configured: str = "") -> list[str]:
     import shutil
 
@@ -229,6 +240,12 @@ class LocalServerManager:
             if app is None:
                 return "Paper API 未返回可下载文件"
             await asyncio.to_thread(_http_download, app["url"], self.jar_path, 180)
+            expected = (app.get("checksums") or {}).get("sha256") or app.get("sha256")
+            if expected:
+                actual = await asyncio.to_thread(_file_sha256, self.jar_path)
+                if not actual or actual.lower() != str(expected).lower():
+                    self.jar_path.unlink(missing_ok=True)
+                    return "服务器核心 sha256 校验失败，已删除下载文件，请重试"
             return None
         except Exception as exc:  # noqa: BLE001
             return str(exc)
@@ -310,7 +327,8 @@ class LocalServerManager:
                     # 尝试查找并显示占用进程信息
                     try:
                         import subprocess
-                        result = subprocess.run(
+                        result = await asyncio.to_thread(
+                            subprocess.run,
                             ['netstat', '-ano'], 
                             capture_output=True, 
                             text=True, 
@@ -340,7 +358,9 @@ class LocalServerManager:
         self._write_server_properties()
         if not self.java_path:
             try:
-                self.java_path = self.java_manager.find_suitable_java(self.version)
+                self.java_path = await asyncio.to_thread(
+                    self.java_manager.find_suitable_java, self.version
+                )
                 self.log_cb(f"自动选择 Java：{self.java_path}")
             except ValueError as exc:
                 return f"Java 自动选择失败：{exc}"
