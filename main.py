@@ -27,7 +27,7 @@ from .chat_bridge import ChatBridge
 from .persona import Persona, build_persona
 from .server_manager import LocalServerManager
 from .launcher_api_client import LauncherAPIClient
-from .goal_system import GoalManager
+from .goal_system_v2 import GoalManagerV2
 
 PLUGIN_VERSION = "0.1.0"
 PLUGIN_NAME = "astrbot_plugin_minecraft"
@@ -56,7 +56,7 @@ class MinecraftPlugin(Star):
         self._connecting = False
         self._persona_obj: Persona | None = None
         self._persona_choice_file = self.data_dir / "persona_choice.json"
-        self.goal_manager: GoalManager | None = None
+        self.goal_manager: GoalManagerV2 | None = None
 
     # ---------- 配置 ----------
     def _cfg(self, key: str, default=None):
@@ -348,15 +348,13 @@ class MinecraftPlugin(Star):
             
             # 连接成功后，启动目标管理器（如果启用）
             if self._cfg("enable_goal_system", False) and self.bot.connected:
-                goal_save_path = self.data_dir / "goal_progress.json"
-                self.goal_manager = GoalManager(
+                self.goal_manager = GoalManagerV2(
                     self.bot,
-                    goal_save_path,
+                    speak_callback=self._goal_speak,
                     llm_callback=self._goal_llm if self._cfg("goal_use_llm", True) else None
                 )
-                self.goal_manager.speak_callback = self._goal_speak
-                await self.goal_manager.start()
-                logger.info("目标管理器已启动")
+                self.goal_manager.start()
+                logger.info("目标管理器 V2 已启动")
             
             return None
         finally:
@@ -743,29 +741,27 @@ class MinecraftPlugin(Star):
                 yield event.plain_result("目标系统未启用\n用法：/mc目标 启动")
                 return
             
-            status = self.goal_manager.get_current_status()
+            status = self.goal_manager.get_status()
             if not status["running"]:
                 yield event.plain_result("目标系统已停止")
                 return
             
-            current = status["current_goal"]
+            current = status.get("current_goal")
             if current:
                 yield event.plain_result(
                     f"【当前目标】\n"
                     f"目标：{current['description']}\n"
-                    f"进度：{current['progress']*100:.1f}%\n"
+                    f"进度：{current['progress']*100:.1f}% ({current['current_step']}/{current['total_steps']})\n"
                     f"状态：{current['status']}\n"
-                    f"已完成目标数：{status['completed_count']}"
+                    f"重试：{current['retry_count']}/{current.get('max_retries', 3)}\n"
+                    f"错误：{current.get('last_error', '无') if current.get('last_error') else '无'}"
                 )
             else:
-                yield event.plain_result(
-                    f"暂无当前目标（正在选择中）\n"
-                    f"已完成目标数：{status['completed_count']}"
-                )
+                yield event.plain_result("暂无当前目标（正在选择中）")
             return
         
         if arg == "启动":
-            if self.goal_manager and self.goal_manager._running:
+            if self.goal_manager and self.goal_manager.running:
                 yield event.plain_result("目标系统已在运行")
                 return
             
@@ -773,23 +769,21 @@ class MinecraftPlugin(Star):
                 yield event.plain_result("请先进服（/mc连接）")
                 return
             
-            goal_save_path = self.data_dir / "goal_progress.json"
-            self.goal_manager = GoalManager(
+            self.goal_manager = GoalManagerV2(
                 self.bot,
-                goal_save_path,
+                speak_callback=self._goal_speak,
                 llm_callback=self._goal_llm if self._cfg("goal_use_llm", True) else None
             )
-            self.goal_manager.speak_callback = self._goal_speak
-            await self.goal_manager.start()
-            yield event.plain_result("✓ 目标系统已启动，机器人开始自主游玩")
+            self.goal_manager.start()
+            yield event.plain_result("✓ 目标系统 V2 已启动，机器人开始自主游玩")
             return
         
         if arg == "停止":
-            if not self.goal_manager or not self.goal_manager._running:
+            if not self.goal_manager or not self.goal_manager.running:
                 yield event.plain_result("目标系统未运行")
                 return
             
-            await self.goal_manager.stop()
+            self.goal_manager.stop()
             yield event.plain_result("✓ 目标系统已停止")
             return
         
