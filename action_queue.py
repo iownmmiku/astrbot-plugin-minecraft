@@ -101,6 +101,16 @@ class ActionQueue:
             return True
         return False
 
+    async def cancel_all(self) -> int:
+        """取消所有尚未开始的动作，返回取消数量。"""
+        count = 0
+        for task in self._tasks.values():
+            if task.status == ActionStatus.PENDING:
+                task.status = ActionStatus.CANCELLED
+                task.completed_at = time.time()
+                count += 1
+        return count
+
     def get_current_task(self) -> ActionTask | None:
         """获取当前正在执行的任务"""
         return self._current_task

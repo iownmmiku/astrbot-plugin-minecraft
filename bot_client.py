@@ -488,6 +488,9 @@ class MCBot:
         self.compression_threshold = -1
         self._compression_enabled = False
         self.connected = False
+        self.lifecycle_state = "disconnected"
+        self.is_dead = False
+        self._respawn_task: asyncio.Task | None = None
 
         self.entity_id: int | None = None
         self.position: tuple[float, float, float] | None = None
@@ -753,10 +756,42 @@ class MCBot:
         await self._send(SBTSettings())
 
     async def _on_respawn(self, buf: Buffer) -> None:
-        # 死亡重生：重置位置等待服务器同步
+        """处理服务器重生包，并恢复自主行为。"""
+        self.is_dead = False
+        self.lifecycle_state = "respawning"
+        self.health = 20.0
+        self.food = 20
+        self.food_saturation = 5.0
         self.position = None
+        if self.action_queue:
+            await self.action_queue.cancel_all()
+        await self._fire("on_respawn")
 
-    async def _on_keep_alive(self, buf: Buffer) -> None:
+    async def _request_respawn(self) -> None:
+        """向服务器请求重生（ClientCommand action=0）。"""
+        if not self.connected or not self.is_dead:
+            return
+        try:
+            await self._send(SBTClientCommand(0))
+            logger.info("已发送自动重生请求")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("发送自动重生请求失败：%s", exc)
+
+    async def _on_health(self, buf: Buffer) -> None:
+        self.health = buf.read_value(StructFormat.FLOAT)
+        self.food = buf.read_varint()
+        self.food_saturation = buf.read_value(StructFormat.FLOAT)
+        if self.health <= 0 and not self.is_dead:
+            self.is_dead = True
+            self.lifecycle_state = "dead"
+            if self.action_queue:
+                await self.action_queue.cancel_all()
+            await self._fire("on_death")
+            await asyncio.sleep(0.5)
+            await self._request_respawn()
+        elif self.health > 0:
+            self.lifecycle_state = "playing"
+        await self._fire("on_health", self.health, self.food)
         keep_id = buf.read_value(StructFormat.LONGLONG)
         await self._send(SBTKeepAlive(keep_id))
 
