@@ -632,29 +632,7 @@ class MinecraftPlugin(Star):
             "/mc目标 - 查看当前目标状态\n"
             "/mc目标 启动 - 启动目标系统\n"
             "/mc目标 停止 - 停止目标系统"
-            )
-            return
-        if arg.lower() in ("列表", "list", "ls"):
-            try:
-                models = await provider.get_models()
-            except Exception as exc:  # noqa: BLE001
-                yield event.plain_result(f"获取模型列表失败：{exc}")
-                return
-            if not models:
-                yield event.plain_result("该 Provider 未提供模型列表，请直接输入模型名。")
-                return
-            yield event.plain_result("可用模型：" + "、".join(models[:30]))
-            return
-        target = arg.split()[0]
-        try:
-            models = await provider.get_models()
-            if models and target not in models:
-                yield event.plain_result(f"模型「{target}」不在可用列表里。\n可用：{'、'.join(models[:20])}")
-                return
-        except Exception:  # noqa: BLE001
-            pass  # 拿不到列表时允许直接输入
-        self.config["llm_model"] = target
-        yield event.plain_result(f"模型已切换为：{target}（本次运行生效；持久保存请到 WebUI 插件配置）")
+        )
 
     @filter.command("mc起服")
     async def mc_start_server(self, event: AstrMessageEvent):
