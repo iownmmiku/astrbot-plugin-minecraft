@@ -38,13 +38,7 @@ logger = logging.getLogger("astrbot_plugin_minecraft.bot")
 PROTOCOL_VERSION = 763  # Minecraft 1.20.1
 
 # ---- clientbound play 包 ID（protocol 763）----
-CB_SPAWN_ENTITY = 0x01
 CB_NAMED_ENTITY_SPAWN = 0x03
-CB_BLOCK_CHANGE = 0x09
-CB_OPEN_WINDOW = 0x2F
-CB_WINDOW_ITEMS = 0x13
-CB_CLOSE_WINDOW = 0x12
-CB_MULTI_BLOCK_CHANGE = 0x3F
 CB_SET_CONTAINER_CONTENT = 0x11
 CB_SET_SLOT = 0x15
 CB_KEEP_ALIVE = 0x23
@@ -72,8 +66,6 @@ SB_TELEPORT_CONFIRM = 0x00
 SB_CHAT_MESSAGE = 0x05
 SB_CLIENT_COMMAND = 0x07
 SB_SETTINGS = 0x08
-SB_CLICK_WINDOW = 0x0D
-SB_CLOSE_WINDOW = 0x0E
 SB_KEEP_ALIVE = 0x12
 SB_POSITION = 0x14
 SB_POSITION_LOOK = 0x15
@@ -124,60 +116,7 @@ def unpack_position(value: int) -> tuple[int, int, int]:
     return x, y, z
 
 
-# 常见 1.20.1 物品 ID（用于目标系统和状态展示）
-ITEM_NAMES = {
-    # 方块类
-    1: "stone", 2: "grass_block", 3: "dirt", 4: "cobblestone", 5: "oak_planks",
-    6: "oak_sapling", 7: "bedrock", 8: "water", 9: "lava", 12: "sand", 13: "gravel",
-    14: "gold_ore", 15: "iron_ore", 16: "coal_ore", 17: "oak_log", 18: "oak_leaves",
-    20: "glass", 24: "sandstone", 35: "wool", 45: "bricks", 46: "tnt", 47: "bookshelf",
-    49: "obsidian", 53: "oak_stairs", 54: "chest", 56: "diamond_ore", 58: "crafting_table",
-    60: "farmland", 61: "furnace", 82: "clay", 98: "stone_bricks",
-    162: "acacia_log", 162: "dark_oak_log",
-    
-    # 工具类
-    256: "iron_shovel", 257: "iron_pickaxe", 258: "iron_axe", 
-    267: "iron_sword", 268: "wooden_sword", 269: "wooden_shovel", 270: "wooden_pickaxe",
-    271: "wooden_axe", 272: "stone_sword", 273: "stone_shovel", 274: "stone_pickaxe",
-    275: "stone_axe", 276: "diamond_sword", 277: "diamond_shovel", 278: "diamond_pickaxe",
-    279: "diamond_axe", 283: "golden_sword", 284: "golden_shovel", 285: "golden_pickaxe",
-    286: "golden_axe", 290: "wooden_hoe", 291: "stone_hoe", 292: "iron_hoe",
-    293: "diamond_hoe", 294: "golden_hoe",
-    
-    # 武器盔甲
-    298: "leather_helmet", 299: "leather_chestplate", 300: "leather_leggings", 301: "leather_boots",
-    302: "chainmail_helmet", 303: "chainmail_chestplate", 304: "chainmail_leggings", 305: "chainmail_boots",
-    306: "iron_helmet", 307: "iron_chestplate", 308: "iron_leggings", 309: "iron_boots",
-    310: "diamond_helmet", 311: "diamond_chestplate", 312: "diamond_leggings", 313: "diamond_boots",
-    314: "golden_helmet", 315: "golden_chestplate", 316: "golden_leggings", 317: "golden_boots",
-    261: "bow", 262: "arrow", 346: "fishing_rod", 359: "shears",
-    
-    # 材料类
-    263: "coal", 264: "diamond", 265: "iron_ingot", 266: "gold_ingot",
-    280: "stick", 281: "bowl", 287: "string", 288: "feather", 289: "gunpowder",
-    318: "flint", 319: "pork", 320: "cooked_porkchop", 321: "painting",
-    323: "oak_sign", 324: "oak_door", 325: "bucket", 326: "water_bucket",
-    327: "lava_bucket", 331: "redstone", 334: "leather", 335: "milk_bucket",
-    336: "brick", 337: "clay_ball", 338: "sugar_cane", 339: "paper",
-    341: "slime_ball", 344: "egg", 348: "glowstone_dust", 351: "bone_meal",
-    352: "bone", 353: "sugar", 360: "melon_slice", 362: "pumpkin_seeds",
-    363: "melon_seeds", 365: "chicken", 366: "cooked_chicken", 375: "spider_eye",
-    376: "fermented_spider_eye", 377: "blaze_powder", 378: "magma_cream",
-    381: "ender_pearl", 382: "blaze_rod", 383: "ghast_tear",
-    
-    # 食物类
-    260: "apple", 282: "mushroom_stew", 297: "bread", 319: "pork",
-    320: "cooked_porkchop", 322: "golden_apple", 349: "raw_fish", 350: "cooked_fish",
-    354: "cake", 357: "cookie", 360: "melon_slice", 363: "raw_beef",
-    364: "steak", 365: "chicken", 366: "cooked_chicken", 367: "rotten_flesh",
-    391: "carrot", 392: "potato", 393: "baked_potato", 394: "poisonous_potato",
-    396: "golden_carrot", 400: "pumpkin_pie", 413: "rabbit_stew",
-    423: "raw_mutton", 424: "cooked_mutton", 425: "rabbit", 426: "cooked_rabbit",
-    432: "rabbit_foot", 433: "rabbit_hide", 434: "beetroot_soup", 435: "beetroot_seeds",
-    436: "beetroot", 437: "sweet_berries",
-}
-
-
+# 常见系统消息的 translate 键 → 中文模板（%s 为 with 参数）
 TRANSLATE_MAP = {
     "multiplayer.player.joined": "%s 加入了游戏",
     "multiplayer.player.left": "%s 离开了游戏",
@@ -435,62 +374,6 @@ class SBTHeldItemSlot(PlayServerBoundPacket):
 
 @final
 @define
-class SBTClickWindow(PlayServerBoundPacket):
-    """Click Window (0x0D)：点击窗口槽位（合成、容器等）。"""
-    PACKET_ID = SB_CLICK_WINDOW
-
-    window_id: int
-    state_id: int
-    slot: int
-    button: int
-    mode: int
-    slots: list[tuple[int, dict[str, Any]]]  # [(slot_id, slot_data), ...]
-    carried_item: dict[str, Any] | None
-
-    def serialize_to(self, buf: Buffer) -> None:
-        buf.write_value(StructFormat.UBYTE, self.window_id)
-        buf.write_varint(self.state_id)
-        buf.write_value(StructFormat.SHORT, self.slot)
-        buf.write_value(StructFormat.BYTE, self.button)
-        buf.write_varint(self.mode)
-        
-        # 写入变化的槽位
-        buf.write_varint(len(self.slots))
-        for slot_id, slot_data in self.slots:
-            buf.write_value(StructFormat.SHORT, slot_id)
-            self._write_slot(buf, slot_data)
-        
-        # 写入鼠标拖动的物品
-        self._write_slot(buf, self.carried_item)
-
-    @staticmethod
-    def _write_slot(buf: Buffer, slot_data: dict[str, Any] | None) -> None:
-        """写入一个 Slot 数据。"""
-        if slot_data is None:
-            buf.write_value(StructFormat.BOOL, False)
-        else:
-            buf.write_value(StructFormat.BOOL, True)
-            buf.write_varint(slot_data["item_id"])
-            buf.write_value(StructFormat.BYTE, slot_data["count"])
-            # NBT/components（简化：写入原始 bytes）
-            nbt = slot_data.get("nbt", b"")
-            buf.write_bytearray(nbt if isinstance(nbt, bytes) else b"")
-
-
-@final
-@define
-class SBTCloseWindow(PlayServerBoundPacket):
-    """Close Window (0x0E)：关闭窗口。"""
-    PACKET_ID = SB_CLOSE_WINDOW
-
-    window_id: int
-
-    def serialize_to(self, buf: Buffer) -> None:
-        buf.write_value(StructFormat.UBYTE, self.window_id)
-
-
-@final
-@define
 class SBTBlockDig(PlayServerBoundPacket):
     """ServerBound Player Digging (1.20.1)：status / location(打包 position) / face / sequence"""
 
@@ -623,16 +506,7 @@ class MCBot:
         self.held_slot = 0  # 当前手持物品栏位 (0-8)
 
         self.players: dict[str, str] = {}       # uuid -> 玩家名
-        self.entities: dict[int, dict[str, Any]] = {}  # entityId -> {type, uuid?, x, y, z, ...}
-        
-        # 方块状态缓存（阶段 2）：(x,y,z) -> block_id，有限范围内的方块
-        self.blocks: dict[tuple[int, int, int], int] = {}
-        self.block_cache_radius = 32  # 缓存半径（格）
-        
-        # 窗口系统（阶段 4）
-        self.open_window_id: int | None = None
-        self.window_state_id = 0
-        self.window_items: dict[int, dict[str, Any]] = {}  # 当前打开窗口的物品
+        self.entities: dict[int, dict[str, Any]] = {}  # entityId -> {uuid, x, y, z}
 
         self._callbacks: dict[str, Callable] = {}
         self._tasks: list[asyncio.Task] = []
@@ -860,7 +734,6 @@ class MCBot:
             CB_PLAYER_INFO: self._on_player_info,
             CB_PLAYER_REMOVE: self._on_player_remove,
             CB_NAMED_ENTITY_SPAWN: self._on_named_entity_spawn,
-            CB_SPAWN_ENTITY: self._on_spawn_entity,
             CB_REL_ENTITY_MOVE: self._on_rel_entity_move,
             CB_ENTITY_MOVE_LOOK: self._on_entity_move_look,
             CB_ENTITY_TELEPORT: self._on_entity_teleport,
@@ -870,11 +743,6 @@ class MCBot:
             CB_LOGIN: self._on_login,
             CB_RESPAWN: self._on_respawn,
             CB_SPAWN_POSITION: self._on_spawn_position,
-            CB_BLOCK_CHANGE: self._on_block_change,
-            CB_MULTI_BLOCK_CHANGE: self._on_multi_block_change,
-            CB_OPEN_WINDOW: self._on_open_window,
-            CB_WINDOW_ITEMS: self._on_window_items,
-            CB_CLOSE_WINDOW: self._on_close_window,
         }
         handler = handlers.get(packet_id)
         if handler:
@@ -924,7 +792,6 @@ class MCBot:
         elif self.health > 0:
             self.lifecycle_state = "playing"
         await self._fire("on_health", self.health, self.food)
-    async def _on_keep_alive(self, buf: Buffer) -> None:
         keep_id = buf.read_value(StructFormat.LONGLONG)
         await self._send(SBTKeepAlive(keep_id))
 
@@ -954,6 +821,12 @@ class MCBot:
         self.position = (x, y, z)
         if teleport_id >= 0:
             await self._send(SBTTeleportConfirm(teleport_id))
+
+    async def _on_health(self, buf: Buffer) -> None:
+        self.health = buf.read_value(StructFormat.FLOAT)
+        self.food = buf.read_varint()
+        self.food_saturation = buf.read_value(StructFormat.FLOAT)
+        await self._fire("on_health", self.health, self.food)
 
     def _read_slot(self, buf: Buffer) -> dict[str, Any] | None:
         """读取一个物品槽位数据（Slot 类型）。
@@ -1018,139 +891,6 @@ class MCBot:
             z -= (1 << 26)
         self.spawn_position = (float(x), float(y), float(z))
         logger.info("出生点坐标：%s", self.spawn_position)
-
-    async def _on_block_change(self, buf: Buffer) -> None:
-        """Block Change (0x09)：单个方块变化。"""
-        packed = buf.read_value(StructFormat.LONGLONG)
-        x, y, z = unpack_position(packed)
-        block_id = buf.read_varint()
-        
-        # 更新方块缓存（仅在缓存半径内）
-        if self.position:
-            px, py, pz = self.position
-            if abs(x - px) <= self.block_cache_radius and abs(z - pz) <= self.block_cache_radius:
-                if block_id == 0:  # 空气
-                    self.blocks.pop((x, y, z), None)
-                else:
-                    self.blocks[(x, y, z)] = block_id
-                logger.debug("方块变化：(%d,%d,%d) -> %d", x, y, z, block_id)
-
-    async def _on_multi_block_change(self, buf: Buffer) -> None:
-        """Multi Block Change (0x3F)：批量方块变化。"""
-        # 1.20.1 格式：chunk_section_position(i64) + count(varint) + [packed_position(varint) + block_id(varint)] * count
-        section_pos = buf.read_value(StructFormat.LONGLONG)
-        # section_pos = ((chunkX & 0x3FFFFF) << 42) | (chunkY & 0xFFFFF) | ((chunkZ & 0x3FFFFF) << 20)
-        chunk_x = (section_pos >> 42)
-        chunk_y = (section_pos & 0xFFFFF)
-        chunk_z = ((section_pos >> 20) & 0x3FFFFF)
-        if chunk_x >= (1 << 21):
-            chunk_x -= (1 << 22)
-        if chunk_y >= (1 << 19):
-            chunk_y -= (1 << 20)
-        if chunk_z >= (1 << 21):
-            chunk_z -= (1 << 22)
-        
-        count = buf.read_varint()
-        for _ in range(count):
-            packed = buf.read_varint()
-            block_id = buf.read_varint()
-            
-            # packed = (localX << 8) | (localZ << 4) | localY（每个 4 位）
-            local_x = (packed >> 8) & 0xF
-            local_z = (packed >> 4) & 0xF
-            local_y = packed & 0xF
-            
-            # 转为世界坐标
-            x = chunk_x * 16 + local_x
-            y = chunk_y * 16 + local_y
-            z = chunk_z * 16 + local_z
-            
-            # 更新方块缓存（仅在缓存半径内）
-            if self.position:
-                px, py, pz = self.position
-                if abs(x - px) <= self.block_cache_radius and abs(z - pz) <= self.block_cache_radius:
-                    if block_id == 0:
-                        self.blocks.pop((x, y, z), None)
-                    else:
-                        self.blocks[(x, y, z)] = block_id
-
-    async def _on_spawn_entity(self, buf: Buffer) -> None:
-        """Spawn Entity (0x01)：生成非玩家实体（生物、物品、掉落物等）。"""
-        entity_id = buf.read_varint()
-        uuid = UUID.deserialize(buf)
-        entity_type_id = buf.read_varint()
-        x = buf.read_value(StructFormat.DOUBLE)
-        y = buf.read_value(StructFormat.DOUBLE)
-        z = buf.read_value(StructFormat.DOUBLE)
-        pitch = buf.read_value(StructFormat.BYTE)
-        yaw = buf.read_value(StructFormat.BYTE)
-        head_yaw = buf.read_value(StructFormat.BYTE)
-        data = buf.read_varint()
-        velocity_x = buf.read_value(StructFormat.SHORT)
-        velocity_y = buf.read_value(StructFormat.SHORT)
-        velocity_z = buf.read_value(StructFormat.SHORT)
-        
-        # 简单分类：item(实体类型 37), experience_orb(24), 其他为生物/投射物等
-        if entity_type_id == 37:
-            entity_category = "item"
-        elif entity_type_id == 24:
-            entity_category = "xp_orb"
-        elif entity_type_id in {50, 51, 52, 53, 54, 55, 56, 57, 58, 59}:  # 敌对生物（僵尸、骷髅、蜘蛛等）
-            entity_category = "hostile"
-        elif entity_type_id in {10, 11, 12, 13, 14, 15, 16, 17, 18, 91, 92, 93}:  # 被动生物（猪、牛、羊、鸡等）
-            entity_category = "passive"
-        else:
-            entity_category = "other"
-        
-        self.entities[entity_id] = {
-            "type": entity_category,
-            "type_id": entity_type_id,
-            "uuid": str(uuid),
-            "x": x,
-            "y": y,
-            "z": z,
-        }
-        logger.debug("实体生成：%s (id=%d, type=%d)", entity_category, entity_id, entity_type_id)
-
-    async def _on_open_window(self, buf: Buffer) -> None:
-        """Open Window (0x2F)：服务器打开一个窗口（容器、工作台等）。"""
-        window_id = buf.read_varint()
-        window_type = buf.read_varint()
-        title = buf.read_utf()
-        
-        self.open_window_id = window_id
-        self.window_items.clear()
-        logger.info("打开窗口：ID=%d, 类型=%d, 标题=%s", window_id, window_type, title)
-
-    async def _on_window_items(self, buf: Buffer) -> None:
-        """Window Items (0x13)：窗口的完整物品列表。"""
-        window_id = buf.read_value(StructFormat.UBYTE)
-        state_id = buf.read_varint()
-        count = buf.read_varint()
-        
-        items = []
-        for _ in range(count):
-            slot_data = self._read_slot(buf)
-            items.append(slot_data)
-        
-        carried_item = self._read_slot(buf)
-        
-        # 更新窗口物品
-        if window_id == self.open_window_id:
-            self.window_state_id = state_id
-            self.window_items.clear()
-            for i, slot_data in enumerate(items):
-                if slot_data:
-                    self.window_items[i] = slot_data
-            logger.debug("窗口 %d 物品已更新：%d 个非空槽位", window_id, len(self.window_items))
-
-    async def _on_close_window(self, buf: Buffer) -> None:
-        """Close Window (0x12)：服务器关闭窗口。"""
-        window_id = buf.read_value(StructFormat.UBYTE)
-        if window_id == self.open_window_id:
-            self.open_window_id = None
-            self.window_items.clear()
-            logger.debug("窗口 %d 已关闭", window_id)
 
     async def _on_system_chat(self, buf: Buffer) -> None:
         content = buf.read_utf()
@@ -1252,13 +992,7 @@ class MCBot:
         z = buf.read_value(StructFormat.DOUBLE)
         buf.read_value(StructFormat.BYTE)  # yaw
         buf.read_value(StructFormat.BYTE)  # pitch
-        self.entities[entity_id] = {
-            "type": "player",
-            "uuid": str(uuid),
-            "x": x,
-            "y": y,
-            "z": z,
-        }
+        self.entities[entity_id] = {"uuid": str(uuid), "x": x, "y": y, "z": z}
 
     async def _on_rel_entity_move(self, buf: Buffer) -> None:
         entity_id = buf.read_varint()
@@ -1437,39 +1171,16 @@ class MCBot:
         服务器对每个移动包校验位移（超过 ~0.25 格会报 "moved wrongly" 并橡皮筋弹回），
         因此按真实客户端节奏以 20Hz 发送、每包步进约 0.22 格；每步都从服务器最新
         同步的位置重新计算方向，地形起伏被弹回时也能继续走。
-        
-        改进：
-        - 增加卡住检测：如果连续 3 秒位置未变化，判定为卡住
-        - 增加取消支持：死亡或动作队列取消时立即停止
         """
         if not self.connected or self.position is None:
             return "机器人未连接或尚未同步位置"
-        
         deadline = time.monotonic() + timeout
-        last_pos = self.position
-        stuck_start = time.monotonic()
-        stuck_threshold = 3.0  # 3秒不动判定卡住
-        
         while self.connected and time.monotonic() < deadline:
-            # 检查是否死亡
-            if self.is_dead:
-                return "机器人已死亡"
-            
             cx, cy, cz = self.position
             dx, dz = x - cx, z - cz
             dist = math.hypot(dx, dz)
-            
             if dist < 0.3:
                 return None
-            
-            # 卡住检测
-            if math.hypot(cx - last_pos[0], cz - last_pos[2]) < 0.05:
-                if time.monotonic() - stuck_start > stuck_threshold:
-                    return f"移动卡住（{stuck_threshold}秒未前进）"
-            else:
-                last_pos = (cx, cy, cz)
-                stuck_start = time.monotonic()
-            
             yaw = math.degrees(math.atan2(dx, dz))
             step_dist = min(MOVE_STEP, dist)
             nx = cx + dx / dist * step_dist
@@ -1477,100 +1188,46 @@ class MCBot:
             await self._send(SBTPositionLook(nx, cy, nz, yaw, self.pitch))
             self.position = (nx, cy, nz)
             await asyncio.sleep(MOVE_TICK)
-        
         return "移动超时" if self.connected else "连接已断开"
 
 
     async def mine(self, x: int, y: int, z: int, *, timeout: float = 30.0) -> str | None:
-        """挖掘指定方块，带服务器验证。成功返回 None，失败返回原因。
-        
-        改进：
-        - 检查方块是否存在（非空气）
-        - 验证距离
-        - 等待方块变化确认
-        - 超时机制
-        """
+        """挖掘指定方块。成功返回 None，失败返回原因。"""
         if not self.connected or self.position is None:
             return "机器人未连接或尚未同步位置"
-        
-        # 检查方块是否存在
-        block_id = self.get_block(x, y, z)
-        if block_id == 0 or block_id is None:
-            return "目标位置是空气或未加载"
-        
         bx, by, bz = self.position
         dist = math.sqrt((bx - x - 0.5) ** 2 + (by - y) ** 2 + (bz - z - 0.5) ** 2)
         if dist > REACH_DISTANCE:
             return f"目标方块距离 {dist:.1f} 格，超出可挖掘距离（{REACH_DISTANCE} 格）"
-        
-        # 记录挖掘前的方块ID
-        original_block = block_id
-        
         face = self._face_toward(bx, by, bz, x, y, z)
         self._dig_sequence += 1
-        
         # 面向目标方块
         yaw = math.degrees(math.atan2(x + 0.5 - bx, z + 0.5 - bz))
         pitch = math.degrees(math.atan2(y + 0.5 - by, math.hypot(x + 0.5 - bx, z + 0.5 - bz)))
         await self._send(SBTLook(yaw, pitch))
         self.yaw, self.pitch = yaw, pitch
-        
-        # 发送挖掘动作
         await self._send(SBTArmAnimation(0))
         await self._send(SBTBlockDig(DIG_START, x, y, z, face, self._dig_sequence))
         await asyncio.sleep(0.15)
-        
         if not self.connected:
             return "连接已断开"
-        
         await self._send(SBTBlockDig(DIG_FINISH, x, y, z, face, self._dig_sequence))
-        
-        # 等待方块变化确认（最多等待 timeout 秒）
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.1)
-            current_block = self.get_block(x, y, z)
-            if current_block == 0 or current_block is None:
-                logger.debug("方块已挖掘：(%d,%d,%d) %d -> 空气", x, y, z, original_block)
-                return None
-            if current_block != original_block:
-                # 方块变了但不是空气（可能被其他玩家放置）
-                return f"方块已变化但不是预期结果（{original_block} -> {current_block}）"
-        
-        return "挖掘超时（服务器未确认方块变化）"
+        return None
 
     async def place_block(self, x: int, y: int, z: int, *, timeout: float = 30.0) -> str | None:
-        """在指定位置放置方块，带验证。成功返回 None，失败返回原因。
+        """在指定位置放置方块。成功返回 None，失败返回原因。
         
-        改进：
-        - 检查手持物品是否可放置
-        - 检查目标位置是否为空气
-        - 等待服务器确认方块放置
+        注意：这需要手持可放置的方块物品。目前简化实现，默认使用主手当前物品。
         """
         if not self.connected or self.position is None:
             return "机器人未连接或尚未同步位置"
-        
-        # 检查目标位置是否为空气
-        block_id = self.get_block(x, y, z)
-        if block_id is not None and block_id != 0:
-            return f"目标位置已有方块（ID {block_id}）"
-        
-        # 检查手持物品
-        held_item = self.inventory.get(self.held_slot)
-        if not held_item:
-            return "手持槽位为空"
-        
-        held_item_id = held_item["item_id"]
-        # 简单检查：物品ID 1-255 通常是方块
-        if held_item_id > 255:
-            return f"手持物品（ID {held_item_id}）不是方块"
-        
         bx, by, bz = self.position
         dist = math.sqrt((bx - x - 0.5) ** 2 + (by - y) ** 2 + (bz - z - 0.5) ** 2)
         if dist > REACH_DISTANCE:
             return f"目标位置距离 {dist:.1f} 格，超出可放置距离（{REACH_DISTANCE} 格）"
         
         # 计算放置面：通常在目标位置下方的方块顶部放置（face=1，即上表面）
+        # 简化实现：在目标位置下方一格的上表面放置
         place_on_y = y - 1
         face = FACE_UP
         
@@ -1580,7 +1237,7 @@ class MCBot:
         await self._send(SBTLook(yaw, pitch))
         self.yaw, self.pitch = yaw, pitch
         
-        # 发送放置方块包
+        # 发送放置方块包（在目标下方的上表面）
         await self._send(SBTArmAnimation(0))
         await self._send(SBTBlockPlace(
             hand=0,
@@ -1589,145 +1246,13 @@ class MCBot:
             z=z,
             face=face,
             cursor_x=0.5,
-            cursor_y=1.0,
+            cursor_y=1.0,  # 点击上表面的顶部
             cursor_z=0.5,
             inside_block=False,
             sequence=0
         ))
-        
-        # 等待方块放置确认
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.1)
-            current_block = self.get_block(x, y, z)
-            if current_block is not None and current_block != 0:
-                logger.debug("方块已放置：(%d,%d,%d) 空气 -> %d", x, y, z, current_block)
-                return None
-        
-        return "放置超时（服务器未确认方块变化）"
-
-    async def collect_drops(self, *, timeout: float = 10.0, max_distance: float = 16.0) -> dict[str, Any]:
-        """拾取周围的掉落物。返回拾取统计。
-        
-        Returns:
-            {"collected": int, "items": list[str], "error": str | None}
-        """
-        if not self.connected or self.position is None:
-            return {"collected": 0, "items": [], "error": "机器人未连接或尚未同步位置"}
-        
-        deadline = time.monotonic() + timeout
-        collected = 0
-        items_collected: list[str] = []
-        
-        while time.monotonic() < deadline:
-            # 查找最近的掉落物
-            drop = self.find_nearest_entity("item", max_distance=max_distance)
-            if not drop:
-                break
-            
-            # 移动到掉落物
-            dx, dz = drop["x"], drop["z"]
-            remaining_time = deadline - time.monotonic()
-            err = await self.move_to(dx, dz, timeout=min(5.0, remaining_time))
-            
-            if err:
-                return {"collected": collected, "items": items_collected, "error": f"移动失败：{err}"}
-            
-            # 等待拾取（实体消失）
-            await asyncio.sleep(0.5)
-            if drop["entity_id"] not in self.entities:
-                collected += 1
-                items_collected.append(f"item_{drop.get('type_id', '?')}")
-            
-            # 继续寻找下一个
-            if time.monotonic() >= deadline:
-                break
-        
-        return {"collected": collected, "items": items_collected, "error": None}
-
-    async def attack_entity(self, entity_id: int) -> str | None:
-        """攻击指定实体。成功返回 None，失败返回原因。
-        
-        注意：这是简化实现，只发送攻击包，不验证伤害。
-        """
-        if not self.connected or self.position is None:
-            return "机器人未连接或尚未同步位置"
-        
-        entity = self.entities.get(entity_id)
-        if not entity:
-            return f"实体 {entity_id} 不存在"
-        
-        ex, ey, ez = entity["x"], entity["y"], entity["z"]
-        px, py, pz = self.position
-        dist = math.sqrt((ex - px) ** 2 + (ey - py) ** 2 + (ez - pz) ** 2)
-        
-        if dist > REACH_DISTANCE:
-            return f"实体距离 {dist:.1f} 格，超出攻击距离（{REACH_DISTANCE} 格）"
-        
-        # 面向实体
-        yaw = math.degrees(math.atan2(ex - px, ez - pz))
-        pitch = math.degrees(math.atan2(ey - py, math.hypot(ex - px, ez - pz)))
-        await self._send(SBTLook(yaw, pitch))
-        self.yaw, self.pitch = yaw, pitch
-        
-        # 发送攻击动作
-        await self._send(SBTArmAnimation(0))
-        # TODO: 需要实现 SBTUseEntity 包（interact entity）
-        # 当前简化版本只挥手，实际攻击需要完整的 UseEntity 包
-        logger.warning("attack_entity 尚未实现完整的 UseEntity 包，只发送了挥手动画")
-        
+        await asyncio.sleep(0.1)
         return None
-
-    # ---------- 合成系统（阶段 4）----------
-    async def craft_item(
-        self,
-        recipe: list[tuple[int, int, int]],  # [(item_id, count, slot), ...]
-        output_slot: int = 0,
-        use_crafting_table: bool = False,
-        *,
-        timeout: float = 10.0,
-    ) -> str | None:
-        """在背包 2×2 或工作台 3×3 合成物品。成功返回 None，失败返回原因。
-        
-        Args:
-            recipe: 配方列表，每项为 (item_id, count, slot)
-                   - 背包合成：slot 0-3 对应 2×2 网格
-                   - 工作台合成：slot 0-8 对应 3×3 网格
-            output_slot: 输出槽位（背包合成=0，工作台合成=0）
-            use_crafting_table: 是否使用工作台（需要靠近并右键点击工作台方块）
-            timeout: 超时时间
-        
-        Returns:
-            成功返回 None，失败返回原因
-        
-        示例：
-            # 4个木板 -> 工作台（背包 2×2）
-            await bot.craft_item([(5, 1, 0), (5, 1, 1), (5, 1, 2), (5, 1, 3)], output_slot=0)
-        """
-        if not self.connected:
-            return "机器人未连接"
-        
-        # 简化实现：目前只支持背包 2×2 合成
-        if use_crafting_table:
-            return "工作台合成尚未实现（需要先右键点击工作台方块打开窗口）"
-        
-        # 检查材料
-        for item_id, count, slot in recipe:
-            if not self.has_item(item_id):
-                item_name = ITEM_NAMES.get(item_id, f"item_{item_id}")
-                return f"缺少材料：{item_name}"
-            if self.count_item(item_id) < count:
-                item_name = ITEM_NAMES.get(item_id, f"item_{item_id}")
-                return f"材料不足：{item_name}（需要 {count}，只有 {self.count_item(item_id)}）"
-        
-        # TODO: 实现完整的合成逻辑
-        # 1. 如果使用工作台，需要先右键点击工作台方块打开窗口
-        # 2. 将材料放入合成网格（ClickWindow 包）
-        # 3. 点击输出槽拾取产物
-        # 4. 关闭窗口
-        
-        logger.warning("craft_item 尚未实现完整的窗口交互逻辑")
-        return "合成功能开发中"
 
     @staticmethod
     def _face_toward(bx: float, by: float, bz: float, x: int, y: int, z: int) -> int:
@@ -1851,48 +1376,6 @@ class MCBot:
         sx, sy, sz = self.spawn_position
         return await self.move_to(sx, sz)
 
-    # ---------- 状态查询方法 ----------
-    def get_block(self, x: int, y: int, z: int) -> int | None:
-        """获取指定位置的方块 ID，未缓存返回 None。"""
-        return self.blocks.get((x, y, z))
-
-    def is_air(self, x: int, y: int, z: int) -> bool:
-        """检查指定位置是否为空气（未缓存默认为空气）。"""
-        return self.blocks.get((x, y, z), 0) == 0
-
-    def find_nearest_entity(self, entity_type: str, max_distance: float = 32.0) -> dict[str, Any] | None:
-        """查找最近的指定类型实体（player/item/xp_orb/hostile/passive/other）。"""
-        if not self.position:
-            return None
-        
-        px, py, pz = self.position
-        candidates = [
-            (eid, e, math.sqrt((e["x"] - px) ** 2 + (e["y"] - py) ** 2 + (e["z"] - pz) ** 2))
-            for eid, e in self.entities.items()
-            if e.get("type") == entity_type
-        ]
-        
-        if not candidates:
-            return None
-        
-        eid, entity, dist = min(candidates, key=lambda t: t[2])
-        if dist > max_distance:
-            return None
-        
-        return {**entity, "entity_id": eid, "distance": round(dist, 2)}
-
-    def count_nearby_entities(self, entity_type: str, radius: float = 16.0) -> int:
-        """统计周围指定类型的实体数量。"""
-        if not self.position:
-            return 0
-        
-        px, py, pz = self.position
-        return sum(
-            1 for e in self.entities.values()
-            if e.get("type") == entity_type
-            and math.sqrt((e["x"] - px) ** 2 + (e["y"] - py) ** 2 + (e["z"] - pz) ** 2) <= radius
-        )
-
     # ---------- 状态 ----------
     def get_status(self) -> dict[str, Any]:
         pos = self.position
@@ -1908,25 +1391,8 @@ class MCBot:
             "is_dead": self.is_dead,
             "lifecycle_state": self.lifecycle_state,
             "inventory": self.inventory,
-            "inventory_named": self.inventory_named(),
             "players": sorted(self.players.values()),
-            "cached_blocks": len(self.blocks),
-            "entities": {
-                "total": len(self.entities),
-                "players": sum(1 for e in self.entities.values() if e.get("type") == "player"),
-                "items": sum(1 for e in self.entities.values() if e.get("type") == "item"),
-                "hostile": sum(1 for e in self.entities.values() if e.get("type") == "hostile"),
-                "passive": sum(1 for e in self.entities.values() if e.get("type") == "passive"),
-            },
         }
-
-    def inventory_named(self) -> dict[str, int]:
-        """返回按物品名称聚合的库存，供目标系统使用。"""
-        result: dict[str, int] = {}
-        for slot in self.inventory.values():
-            name = ITEM_NAMES.get(slot.get("item_id"), f"item_{slot.get('item_id')}")
-            result[name] = result.get(name, 0) + int(slot.get("count", 0))
-        return result
 
     def player_names(self) -> list[str]:
         return sorted(self.players.values())
