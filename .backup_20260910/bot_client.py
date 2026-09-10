@@ -38,10 +38,7 @@ logger = logging.getLogger("astrbot_plugin_minecraft.bot")
 PROTOCOL_VERSION = 763  # Minecraft 1.20.1
 
 # ---- clientbound play 包 ID（protocol 763）----
-CB_SPAWN_ENTITY = 0x01
 CB_NAMED_ENTITY_SPAWN = 0x03
-CB_BLOCK_CHANGE = 0x09
-CB_MULTI_BLOCK_CHANGE = 0x3F
 CB_SET_CONTAINER_CONTENT = 0x11
 CB_SET_SLOT = 0x15
 CB_KEEP_ALIVE = 0x23
@@ -119,60 +116,7 @@ def unpack_position(value: int) -> tuple[int, int, int]:
     return x, y, z
 
 
-# 常见 1.20.1 物品 ID（用于目标系统和状态展示）
-ITEM_NAMES = {
-    # 方块类
-    1: "stone", 2: "grass_block", 3: "dirt", 4: "cobblestone", 5: "oak_planks",
-    6: "oak_sapling", 7: "bedrock", 8: "water", 9: "lava", 12: "sand", 13: "gravel",
-    14: "gold_ore", 15: "iron_ore", 16: "coal_ore", 17: "oak_log", 18: "oak_leaves",
-    20: "glass", 24: "sandstone", 35: "wool", 45: "bricks", 46: "tnt", 47: "bookshelf",
-    49: "obsidian", 53: "oak_stairs", 54: "chest", 56: "diamond_ore", 58: "crafting_table",
-    60: "farmland", 61: "furnace", 82: "clay", 98: "stone_bricks",
-    162: "acacia_log", 162: "dark_oak_log",
-    
-    # 工具类
-    256: "iron_shovel", 257: "iron_pickaxe", 258: "iron_axe", 
-    267: "iron_sword", 268: "wooden_sword", 269: "wooden_shovel", 270: "wooden_pickaxe",
-    271: "wooden_axe", 272: "stone_sword", 273: "stone_shovel", 274: "stone_pickaxe",
-    275: "stone_axe", 276: "diamond_sword", 277: "diamond_shovel", 278: "diamond_pickaxe",
-    279: "diamond_axe", 283: "golden_sword", 284: "golden_shovel", 285: "golden_pickaxe",
-    286: "golden_axe", 290: "wooden_hoe", 291: "stone_hoe", 292: "iron_hoe",
-    293: "diamond_hoe", 294: "golden_hoe",
-    
-    # 武器盔甲
-    298: "leather_helmet", 299: "leather_chestplate", 300: "leather_leggings", 301: "leather_boots",
-    302: "chainmail_helmet", 303: "chainmail_chestplate", 304: "chainmail_leggings", 305: "chainmail_boots",
-    306: "iron_helmet", 307: "iron_chestplate", 308: "iron_leggings", 309: "iron_boots",
-    310: "diamond_helmet", 311: "diamond_chestplate", 312: "diamond_leggings", 313: "diamond_boots",
-    314: "golden_helmet", 315: "golden_chestplate", 316: "golden_leggings", 317: "golden_boots",
-    261: "bow", 262: "arrow", 346: "fishing_rod", 359: "shears",
-    
-    # 材料类
-    263: "coal", 264: "diamond", 265: "iron_ingot", 266: "gold_ingot",
-    280: "stick", 281: "bowl", 287: "string", 288: "feather", 289: "gunpowder",
-    318: "flint", 319: "pork", 320: "cooked_porkchop", 321: "painting",
-    323: "oak_sign", 324: "oak_door", 325: "bucket", 326: "water_bucket",
-    327: "lava_bucket", 331: "redstone", 334: "leather", 335: "milk_bucket",
-    336: "brick", 337: "clay_ball", 338: "sugar_cane", 339: "paper",
-    341: "slime_ball", 344: "egg", 348: "glowstone_dust", 351: "bone_meal",
-    352: "bone", 353: "sugar", 360: "melon_slice", 362: "pumpkin_seeds",
-    363: "melon_seeds", 365: "chicken", 366: "cooked_chicken", 375: "spider_eye",
-    376: "fermented_spider_eye", 377: "blaze_powder", 378: "magma_cream",
-    381: "ender_pearl", 382: "blaze_rod", 383: "ghast_tear",
-    
-    # 食物类
-    260: "apple", 282: "mushroom_stew", 297: "bread", 319: "pork",
-    320: "cooked_porkchop", 322: "golden_apple", 349: "raw_fish", 350: "cooked_fish",
-    354: "cake", 357: "cookie", 360: "melon_slice", 363: "raw_beef",
-    364: "steak", 365: "chicken", 366: "cooked_chicken", 367: "rotten_flesh",
-    391: "carrot", 392: "potato", 393: "baked_potato", 394: "poisonous_potato",
-    396: "golden_carrot", 400: "pumpkin_pie", 413: "rabbit_stew",
-    423: "raw_mutton", 424: "cooked_mutton", 425: "rabbit", 426: "cooked_rabbit",
-    432: "rabbit_foot", 433: "rabbit_hide", 434: "beetroot_soup", 435: "beetroot_seeds",
-    436: "beetroot", 437: "sweet_berries",
-}
-
-
+# 常见系统消息的 translate 键 → 中文模板（%s 为 with 参数）
 TRANSLATE_MAP = {
     "multiplayer.player.joined": "%s 加入了游戏",
     "multiplayer.player.left": "%s 离开了游戏",
@@ -562,11 +506,7 @@ class MCBot:
         self.held_slot = 0  # 当前手持物品栏位 (0-8)
 
         self.players: dict[str, str] = {}       # uuid -> 玩家名
-        self.entities: dict[int, dict[str, Any]] = {}  # entityId -> {type, uuid?, x, y, z, ...}
-        
-        # 方块状态缓存（阶段 2）：(x,y,z) -> block_id，有限范围内的方块
-        self.blocks: dict[tuple[int, int, int], int] = {}
-        self.block_cache_radius = 32  # 缓存半径（格）
+        self.entities: dict[int, dict[str, Any]] = {}  # entityId -> {uuid, x, y, z}
 
         self._callbacks: dict[str, Callable] = {}
         self._tasks: list[asyncio.Task] = []
@@ -794,7 +734,6 @@ class MCBot:
             CB_PLAYER_INFO: self._on_player_info,
             CB_PLAYER_REMOVE: self._on_player_remove,
             CB_NAMED_ENTITY_SPAWN: self._on_named_entity_spawn,
-            CB_SPAWN_ENTITY: self._on_spawn_entity,
             CB_REL_ENTITY_MOVE: self._on_rel_entity_move,
             CB_ENTITY_MOVE_LOOK: self._on_entity_move_look,
             CB_ENTITY_TELEPORT: self._on_entity_teleport,
@@ -804,8 +743,6 @@ class MCBot:
             CB_LOGIN: self._on_login,
             CB_RESPAWN: self._on_respawn,
             CB_SPAWN_POSITION: self._on_spawn_position,
-            CB_BLOCK_CHANGE: self._on_block_change,
-            CB_MULTI_BLOCK_CHANGE: self._on_multi_block_change,
         }
         handler = handlers.get(packet_id)
         if handler:
@@ -855,7 +792,6 @@ class MCBot:
         elif self.health > 0:
             self.lifecycle_state = "playing"
         await self._fire("on_health", self.health, self.food)
-    async def _on_keep_alive(self, buf: Buffer) -> None:
         keep_id = buf.read_value(StructFormat.LONGLONG)
         await self._send(SBTKeepAlive(keep_id))
 
@@ -885,6 +821,12 @@ class MCBot:
         self.position = (x, y, z)
         if teleport_id >= 0:
             await self._send(SBTTeleportConfirm(teleport_id))
+
+    async def _on_health(self, buf: Buffer) -> None:
+        self.health = buf.read_value(StructFormat.FLOAT)
+        self.food = buf.read_varint()
+        self.food_saturation = buf.read_value(StructFormat.FLOAT)
+        await self._fire("on_health", self.health, self.food)
 
     def _read_slot(self, buf: Buffer) -> dict[str, Any] | None:
         """读取一个物品槽位数据（Slot 类型）。
@@ -949,99 +891,6 @@ class MCBot:
             z -= (1 << 26)
         self.spawn_position = (float(x), float(y), float(z))
         logger.info("出生点坐标：%s", self.spawn_position)
-
-    async def _on_block_change(self, buf: Buffer) -> None:
-        """Block Change (0x09)：单个方块变化。"""
-        packed = buf.read_value(StructFormat.LONGLONG)
-        x, y, z = unpack_position(packed)
-        block_id = buf.read_varint()
-        
-        # 更新方块缓存（仅在缓存半径内）
-        if self.position:
-            px, py, pz = self.position
-            if abs(x - px) <= self.block_cache_radius and abs(z - pz) <= self.block_cache_radius:
-                if block_id == 0:  # 空气
-                    self.blocks.pop((x, y, z), None)
-                else:
-                    self.blocks[(x, y, z)] = block_id
-                logger.debug("方块变化：(%d,%d,%d) -> %d", x, y, z, block_id)
-
-    async def _on_multi_block_change(self, buf: Buffer) -> None:
-        """Multi Block Change (0x3F)：批量方块变化。"""
-        # 1.20.1 格式：chunk_section_position(i64) + count(varint) + [packed_position(varint) + block_id(varint)] * count
-        section_pos = buf.read_value(StructFormat.LONGLONG)
-        # section_pos = ((chunkX & 0x3FFFFF) << 42) | (chunkY & 0xFFFFF) | ((chunkZ & 0x3FFFFF) << 20)
-        chunk_x = (section_pos >> 42)
-        chunk_y = (section_pos & 0xFFFFF)
-        chunk_z = ((section_pos >> 20) & 0x3FFFFF)
-        if chunk_x >= (1 << 21):
-            chunk_x -= (1 << 22)
-        if chunk_y >= (1 << 19):
-            chunk_y -= (1 << 20)
-        if chunk_z >= (1 << 21):
-            chunk_z -= (1 << 22)
-        
-        count = buf.read_varint()
-        for _ in range(count):
-            packed = buf.read_varint()
-            block_id = buf.read_varint()
-            
-            # packed = (localX << 8) | (localZ << 4) | localY（每个 4 位）
-            local_x = (packed >> 8) & 0xF
-            local_z = (packed >> 4) & 0xF
-            local_y = packed & 0xF
-            
-            # 转为世界坐标
-            x = chunk_x * 16 + local_x
-            y = chunk_y * 16 + local_y
-            z = chunk_z * 16 + local_z
-            
-            # 更新方块缓存（仅在缓存半径内）
-            if self.position:
-                px, py, pz = self.position
-                if abs(x - px) <= self.block_cache_radius and abs(z - pz) <= self.block_cache_radius:
-                    if block_id == 0:
-                        self.blocks.pop((x, y, z), None)
-                    else:
-                        self.blocks[(x, y, z)] = block_id
-
-    async def _on_spawn_entity(self, buf: Buffer) -> None:
-        """Spawn Entity (0x01)：生成非玩家实体（生物、物品、掉落物等）。"""
-        entity_id = buf.read_varint()
-        uuid = UUID.deserialize(buf)
-        entity_type_id = buf.read_varint()
-        x = buf.read_value(StructFormat.DOUBLE)
-        y = buf.read_value(StructFormat.DOUBLE)
-        z = buf.read_value(StructFormat.DOUBLE)
-        pitch = buf.read_value(StructFormat.BYTE)
-        yaw = buf.read_value(StructFormat.BYTE)
-        head_yaw = buf.read_value(StructFormat.BYTE)
-        data = buf.read_varint()
-        velocity_x = buf.read_value(StructFormat.SHORT)
-        velocity_y = buf.read_value(StructFormat.SHORT)
-        velocity_z = buf.read_value(StructFormat.SHORT)
-        
-        # 简单分类：item(实体类型 37), experience_orb(24), 其他为生物/投射物等
-        if entity_type_id == 37:
-            entity_category = "item"
-        elif entity_type_id == 24:
-            entity_category = "xp_orb"
-        elif entity_type_id in {50, 51, 52, 53, 54, 55, 56, 57, 58, 59}:  # 敌对生物（僵尸、骷髅、蜘蛛等）
-            entity_category = "hostile"
-        elif entity_type_id in {10, 11, 12, 13, 14, 15, 16, 17, 18, 91, 92, 93}:  # 被动生物（猪、牛、羊、鸡等）
-            entity_category = "passive"
-        else:
-            entity_category = "other"
-        
-        self.entities[entity_id] = {
-            "type": entity_category,
-            "type_id": entity_type_id,
-            "uuid": str(uuid),
-            "x": x,
-            "y": y,
-            "z": z,
-        }
-        logger.debug("实体生成：%s (id=%d, type=%d)", entity_category, entity_id, entity_type_id)
 
     async def _on_system_chat(self, buf: Buffer) -> None:
         content = buf.read_utf()
@@ -1143,13 +992,7 @@ class MCBot:
         z = buf.read_value(StructFormat.DOUBLE)
         buf.read_value(StructFormat.BYTE)  # yaw
         buf.read_value(StructFormat.BYTE)  # pitch
-        self.entities[entity_id] = {
-            "type": "player",
-            "uuid": str(uuid),
-            "x": x,
-            "y": y,
-            "z": z,
-        }
+        self.entities[entity_id] = {"uuid": str(uuid), "x": x, "y": y, "z": z}
 
     async def _on_rel_entity_move(self, buf: Buffer) -> None:
         entity_id = buf.read_varint()
@@ -1533,48 +1376,6 @@ class MCBot:
         sx, sy, sz = self.spawn_position
         return await self.move_to(sx, sz)
 
-    # ---------- 状态查询方法 ----------
-    def get_block(self, x: int, y: int, z: int) -> int | None:
-        """获取指定位置的方块 ID，未缓存返回 None。"""
-        return self.blocks.get((x, y, z))
-
-    def is_air(self, x: int, y: int, z: int) -> bool:
-        """检查指定位置是否为空气（未缓存默认为空气）。"""
-        return self.blocks.get((x, y, z), 0) == 0
-
-    def find_nearest_entity(self, entity_type: str, max_distance: float = 32.0) -> dict[str, Any] | None:
-        """查找最近的指定类型实体（player/item/xp_orb/hostile/passive/other）。"""
-        if not self.position:
-            return None
-        
-        px, py, pz = self.position
-        candidates = [
-            (eid, e, math.sqrt((e["x"] - px) ** 2 + (e["y"] - py) ** 2 + (e["z"] - pz) ** 2))
-            for eid, e in self.entities.items()
-            if e.get("type") == entity_type
-        ]
-        
-        if not candidates:
-            return None
-        
-        eid, entity, dist = min(candidates, key=lambda t: t[2])
-        if dist > max_distance:
-            return None
-        
-        return {**entity, "entity_id": eid, "distance": round(dist, 2)}
-
-    def count_nearby_entities(self, entity_type: str, radius: float = 16.0) -> int:
-        """统计周围指定类型的实体数量。"""
-        if not self.position:
-            return 0
-        
-        px, py, pz = self.position
-        return sum(
-            1 for e in self.entities.values()
-            if e.get("type") == entity_type
-            and math.sqrt((e["x"] - px) ** 2 + (e["y"] - py) ** 2 + (e["z"] - pz) ** 2) <= radius
-        )
-
     # ---------- 状态 ----------
     def get_status(self) -> dict[str, Any]:
         pos = self.position
@@ -1590,25 +1391,8 @@ class MCBot:
             "is_dead": self.is_dead,
             "lifecycle_state": self.lifecycle_state,
             "inventory": self.inventory,
-            "inventory_named": self.inventory_named(),
             "players": sorted(self.players.values()),
-            "cached_blocks": len(self.blocks),
-            "entities": {
-                "total": len(self.entities),
-                "players": sum(1 for e in self.entities.values() if e.get("type") == "player"),
-                "items": sum(1 for e in self.entities.values() if e.get("type") == "item"),
-                "hostile": sum(1 for e in self.entities.values() if e.get("type") == "hostile"),
-                "passive": sum(1 for e in self.entities.values() if e.get("type") == "passive"),
-            },
         }
-
-    def inventory_named(self) -> dict[str, int]:
-        """返回按物品名称聚合的库存，供目标系统使用。"""
-        result: dict[str, int] = {}
-        for slot in self.inventory.values():
-            name = ITEM_NAMES.get(slot.get("item_id"), f"item_{slot.get('item_id')}")
-            result[name] = result.get(name, 0) + int(slot.get("count", 0))
-        return result
 
     def player_names(self) -> list[str]:
         return sorted(self.players.values())
