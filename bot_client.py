@@ -491,6 +491,19 @@ class SBTCloseWindow(PlayServerBoundPacket):
 
 @final
 @define
+class SBTPlayerAbilities(PlayServerBoundPacket):
+    """Player Abilities (serverbound)：切换飞行状态（flags 0x02 = flying）。"""
+
+    PACKET_ID = SB_FLYING
+
+    flags: int
+
+    def serialize_to(self, buf: Buffer) -> None:
+        buf.write_value(StructFormat.BYTE, self.flags)
+
+
+@final
+@define
 class SBTBlockDig(PlayServerBoundPacket):
     """ServerBound Player Digging (1.20.1)：status / location(打包 position) / face / sequence"""
 
@@ -600,6 +613,12 @@ class MCBot:
         self.port = port
         self.username = username
         self.reconnect_times = reconnect_times
+        # 飞行（创造模式 / 允许飞行的服务器）
+        self.can_fly = False
+        self.flying = False
+        self.creative = False
+        self.auto_fly = True
+        self.abilities_flags = 0
 
         self.conn: TCPAsyncConnection | None = None
         self.compression_threshold = -1
@@ -875,6 +894,7 @@ class MCBot:
             CB_OPEN_WINDOW: self._on_open_window,
             CB_WINDOW_ITEMS: self._on_window_items,
             CB_CLOSE_WINDOW: self._on_close_window,
+            CB_ABILITIES: self._on_abilities,
         }
         handler = handlers.get(packet_id)
         if handler:
@@ -924,6 +944,39 @@ class MCBot:
         elif self.health > 0:
             self.lifecycle_state = "playing"
         await self._fire("on_health", self.health, self.food)
+    async def _on_abilities(self, buf: Buffer) -> None:
+        """Player Abilities (0x34)：读取服务器授予的能力，必要时自动开飞行。
+
+        创造模式下服务器允许飞行，但不会替你打开 flying——必须自己回一个
+        Player Abilities 包，否则服务器仍按"走路的玩家"来校验位置。
+        """
+        flags = buf.read_value(StructFormat.BYTE)
+        self.abilities_flags = flags
+        self.flying_speed = buf.read_value(StructFormat.FLOAT)
+        self.walk_speed = buf.read_value(StructFormat.FLOAT)
+        self.can_fly = bool(flags & 0x04)
+        self.flying = bool(flags & 0x02)
+        self.creative = bool(flags & 0x08)
+        logger.info(
+            "服务器能力：可飞行=%s 飞行中=%s 创造=%s",
+            self.can_fly,
+            self.flying,
+            self.creative,
+        )
+        if self.can_fly and not self.flying and self.auto_fly:
+            await self.set_flying(True)
+
+    async def set_flying(self, on: bool = True) -> str | None:
+        """切换飞行状态。成功返回 None，失败返回原因。"""
+        if on and not self.can_fly:
+            return "服务器没有授予飞行权限（需要创造模式）"
+        flags = (self.abilities_flags | 0x02) if on else (self.abilities_flags & ~0x02)
+        await self._send(SBTPlayerAbilities(flags))
+        self.abilities_flags = flags
+        self.flying = on
+        logger.info("飞行状态 -> %s", "开启" if on else "关闭")
+        return None
+
     async def _on_keep_alive(self, buf: Buffer) -> None:
         keep_id = buf.read_value(StructFormat.LONGLONG)
         await self._send(SBTKeepAlive(keep_id))
@@ -1416,13 +1469,17 @@ class MCBot:
         direct_dist = math.hypot(x - cx, z - cz)
         
         # 如果启用寻路且直线距离较远，尝试寻路
-        if use_pathfinding and self.pathfinding and direct_dist > 10.0:
+        # 飞行时不绕路：直线飞过去（也避免在没有任何方块数据的地图上寻路）
+        if use_pathfinding and self.pathfinding and direct_dist > 10.0 and not self.flying:
             path = self.pathfinding.find_path((cx, cy, cz), (x, cy, z))
             if path:
                 # 沿路径点依次移动
-                per_waypoint_timeout = timeout / len(path) if len(path) > 0 else timeout
+                # 不要把总超时按路径点平分：长路径会只剩零点几秒，必然超时
+                per_waypoint_timeout = max(8.0, timeout / max(1, len(path)))
                 for px, py, pz in path[1:]:  # 跳过起点
-                    err = await self._move_direct(px, pz, timeout=per_waypoint_timeout)
+                    err = await self._move_direct(
+                        px, pz, timeout=per_waypoint_timeout, y=float(py)
+                    )
                     if err:
                         return f"寻路移动失败：{err}"
                 return None
@@ -1431,7 +1488,27 @@ class MCBot:
         # 直线移动
         return await self._move_direct(x, z, timeout=timeout)
 
-    async def _move_direct(self, x: float, z: float, *, timeout: float = 60.0) -> str | None:
+    async def jump(self) -> str | None:
+        """跳一下（越过 1 格台阶 / 卡住脱困）。成功返回 None，失败返回原因。
+
+        服务器不接受单包过大的垂直位移，所以按接近原版的节奏逐 tick 抬升，
+        单包增量 0.42 / 0.33 / 0.26，累计约 1.01 格。
+        """
+        if not self.connected or self.position is None:
+            return "机器人未连接或尚未同步位置"
+        x, y, z = self.position
+        for offset in (0.42, 0.33, 0.26):
+            if not self.connected:
+                return "连接已断开"
+            y += offset
+            await self._send(SBTPositionLook(x, y, z, self.yaw, self.pitch))
+            self.position = (x, y, z)
+            await asyncio.sleep(MOVE_TICK)
+        return None
+
+    async def _move_direct(
+        self, x: float, z: float, *, timeout: float = 60.0, y: float | None = None
+    ) -> str | None:
         """直线走到 (x, z)，保持服务器同步的高度；成功返回 None，失败返回原因。
 
         服务器对每个移动包校验位移（超过 ~0.25 格会报 "moved wrongly" 并橡皮筋弹回），
@@ -1447,8 +1524,10 @@ class MCBot:
         
         deadline = time.monotonic() + timeout
         last_pos = self.position
+        base_y = self.position[1]  # 本次移动的起始高度，用来限制脱困跳跃的总抬升
         stuck_start = time.monotonic()
         stuck_threshold = 3.0  # 3秒不动判定卡住
+        jump_attempts = 0
         
         while self.connected and time.monotonic() < deadline:
             # 检查是否死亡
@@ -1459,22 +1538,45 @@ class MCBot:
             dx, dz = x - cx, z - cz
             dist = math.hypot(dx, dz)
             
-            if dist < 0.3:
+            if dist < 0.3 and (y is None or abs(cy - y) < 0.3):
                 return None
             
             # 卡住检测
             if math.hypot(cx - last_pos[0], cz - last_pos[2]) < 0.05:
                 if time.monotonic() - stuck_start > stuck_threshold:
+                    if (
+                        not self.flying
+                        and jump_attempts < 2
+                        and self.position[1] - base_y < 1.2
+                    ):
+                        # 多半是被 1 格高的地形挡住，先跳起来试试
+                        jump_attempts += 1
+                        stuck_start = time.monotonic()
+                        logger.info(
+                            "移动卡住，尝试跳跃脱困（第 %s 次）", jump_attempts
+                        )
+                        await self.jump()
+                        continue
                     return f"移动卡住（{stuck_threshold}秒未前进）"
             else:
                 last_pos = (cx, cy, cz)
                 stuck_start = time.monotonic()
             
+            # 高度跟随：寻路给的目标高度和当前高度不一定一样，按小步逼近
+            if y is not None and abs(cy - y) > 0.05:
+                cy += max(-MOVE_STEP, min(MOVE_STEP, y - cy))
+
             yaw = math.degrees(math.atan2(dx, dz))
             step_dist = min(MOVE_STEP, dist)
-            nx = cx + dx / dist * step_dist
-            nz = cz + dz / dist * step_dist
-            await self._send(SBTPositionLook(nx, cy, nz, yaw, self.pitch))
+            if dist > 1e-6:
+                nx = cx + dx / dist * step_dist
+                nz = cz + dz / dist * step_dist
+            else:
+                # X/Z 已经到了，只差高度：原地升降，避免除零
+                nx, nz = cx, cz
+            await self._send(
+                SBTPositionLook(nx, cy, nz, yaw, self.pitch, not self.flying)
+            )
             self.position = (nx, cy, nz)
             await asyncio.sleep(MOVE_TICK)
         
