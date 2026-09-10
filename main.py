@@ -27,6 +27,7 @@ from .chat_bridge import ChatBridge
 from .persona import Persona, build_persona
 from .server_manager import LocalServerManager
 from .launcher_api_client import LauncherAPIClient
+from .goal_system import GoalManager
 
 PLUGIN_VERSION = "0.1.0"
 PLUGIN_NAME = "astrbot_plugin_minecraft"
@@ -55,6 +56,7 @@ class MinecraftPlugin(Star):
         self._connecting = False
         self._persona_obj: Persona | None = None
         self._persona_choice_file = self.data_dir / "persona_choice.json"
+        self.goal_manager: GoalManager | None = None
 
     # ---------- 配置 ----------
     def _cfg(self, key: str, default=None):
@@ -128,6 +130,9 @@ class MinecraftPlugin(Star):
 
     async def terminate(self):
         """插件卸载/停用时优雅清理。"""
+        if self.goal_manager:
+            await self.goal_manager.stop()
+            self.goal_manager = None
         if self.bot:
             await self.bot.disconnect()
             self.bot = None
@@ -249,7 +254,21 @@ class MinecraftPlugin(Star):
             err = await self.bot.connect()
             if err:
                 logger.error("进服失败：%s", err)
-            return err
+                return err
+            
+            # 连接成功后，启动目标管理器（如果启用）
+            if self._cfg("enable_goal_system", False) and self.bot.connected:
+                goal_save_path = self.data_dir / "goal_progress.json"
+                self.goal_manager = GoalManager(
+                    self.bot,
+                    goal_save_path,
+                    llm_callback=self._goal_llm if self._cfg("goal_use_llm", True) else None
+                )
+                self.goal_manager.speak_callback = self._goal_speak
+                await self.goal_manager.start()
+                logger.info("目标管理器已启动")
+            
+            return None
         finally:
             self._connecting = False
 
@@ -356,6 +375,16 @@ class MinecraftPlugin(Star):
     async def _idle_llm(self, prompt: str) -> str | None:
         """空闲行为用的 LLM 通道（自动带人设与配置模型）。"""
         return await self._llm_chat(prompt)
+    
+    async def _goal_llm(self, prompt: str) -> str | None:
+        """目标系统用的 LLM 通道（用于目标决策）。"""
+        return await self._llm_chat(prompt, system_prompt=None)
+    
+    async def _goal_speak(self, text: str) -> None:
+        """目标系统的发言回调（发送到 MC 和订阅群）。"""
+        if self.bot and self.bot.connected:
+            await self.bot.send_chat(text[:100])
+        await self.bridge.broadcast(f"【MC】{self._bot_username}：{text}")
     
     async def _llm_decide_action(self, context: str) -> str | None:
         """让 LLM 为机器人的下一步行动做出决策。
@@ -488,6 +517,78 @@ class MinecraftPlugin(Star):
                 f"当前模型：{current}\n"
                 "用法：/mc模型 <模型名> 切换（输入不带参数时列出可用模型）\n"
                 "可用模型：/mc模型 列表"
+            )
+            return
+        # 设置模型
+        self.config["llm_model"] = arg
+        yield event.plain_result(f"LLM 模型已切换为：{arg}（下次生成生效）")
+    
+    @filter.command("mc目标", alias={"目标", "mcgoal"})
+    async def mc_goal(self, event: AstrMessageEvent):
+        """查看/控制目标系统（让机器人知道自己想干什么）。"""
+        arg = _cmd_rest(event).strip().lower()
+        
+        if not arg or arg == "状态":
+            # 查看当前目标状态
+            if not self.goal_manager:
+                yield event.plain_result("目标系统未启用\n用法：/mc目标 启动")
+                return
+            
+            status = self.goal_manager.get_current_status()
+            if not status["running"]:
+                yield event.plain_result("目标系统已停止")
+                return
+            
+            current = status["current_goal"]
+            if current:
+                yield event.plain_result(
+                    f"【当前目标】\n"
+                    f"目标：{current['description']}\n"
+                    f"进度：{current['progress']*100:.1f}%\n"
+                    f"状态：{current['status']}\n"
+                    f"已完成目标数：{status['completed_count']}"
+                )
+            else:
+                yield event.plain_result(
+                    f"暂无当前目标（正在选择中）\n"
+                    f"已完成目标数：{status['completed_count']}"
+                )
+            return
+        
+        if arg == "启动":
+            if self.goal_manager and self.goal_manager._running:
+                yield event.plain_result("目标系统已在运行")
+                return
+            
+            if not self.bot or not self.bot.connected:
+                yield event.plain_result("请先进服（/mc连接）")
+                return
+            
+            goal_save_path = self.data_dir / "goal_progress.json"
+            self.goal_manager = GoalManager(
+                self.bot,
+                goal_save_path,
+                llm_callback=self._goal_llm if self._cfg("goal_use_llm", True) else None
+            )
+            self.goal_manager.speak_callback = self._goal_speak
+            await self.goal_manager.start()
+            yield event.plain_result("✓ 目标系统已启动，机器人开始自主游玩")
+            return
+        
+        if arg == "停止":
+            if not self.goal_manager or not self.goal_manager._running:
+                yield event.plain_result("目标系统未运行")
+                return
+            
+            await self.goal_manager.stop()
+            yield event.plain_result("✓ 目标系统已停止")
+            return
+        
+        yield event.plain_result(
+            "用法：\n"
+            "/mc目标 - 查看当前目标状态\n"
+            "/mc目标 启动 - 启动目标系统\n"
+            "/mc目标 停止 - 停止目标系统"
             )
             return
         if arg.lower() in ("列表", "list", "ls"):
