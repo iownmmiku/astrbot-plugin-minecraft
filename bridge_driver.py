@@ -35,6 +35,9 @@ EVENT_LABEL = {
     "food": "饿了",
     "build_complete": "施工完成",
     "build_failed": "施工失败",
+    "goal_started": "开始目标",
+    "goal_completed": "完成目标",
+    "goal_blocked": "目标受阻",
 }
 
 
@@ -66,6 +69,7 @@ class BridgeDriver:
         self._callbacks: dict[str, Callable] = {}
         self._status: dict[str, Any] = {}
         self.last_error = ""
+        self._deciding = False   # 正在等 LLM 决策（防止并发）
 
     # ==================== 与 MCBot 对齐的接口 ====================
     @property
@@ -210,6 +214,20 @@ class BridgeDriver:
             if cb:
                 await cb(ev.get("name"), ev.get("text", ""))
             return
+        if kind == "decision_needed":
+            # mod 询问"下一步做什么" → 交给 LLM 决策（异步，不阻塞读循环）
+            cb = self._callbacks.get("on_decision")
+            if cb and not self._deciding:
+                self._deciding = True
+
+                async def _run():
+                    try:
+                        await cb(ev)
+                    finally:
+                        self._deciding = False
+
+                asyncio.create_task(_run())
+            return
         cb = self._callbacks.get("on_event")
         if not cb:
             return
@@ -314,6 +332,20 @@ class BridgeDriver:
 
     async def set_gamemode(self, mode: str) -> str | None:
         _, err = await self.request("gamemode", mode=mode)
+        return err
+
+    async def set_goal(self, goal: str) -> str | None:
+        """直接给女仆下达目标（如 GATHER_WOOD / BUILD_SHELTER）。"""
+        _, err = await self.request("set_goal", goal=str(goal))
+        return err
+
+    async def get_goals(self) -> dict[str, Any]:
+        res, _ = await self.request("get_goals")
+        return res or {}
+
+    async def set_llm_decision(self, enabled: bool = True) -> str | None:
+        """开关：女仆是否把"下一步做什么"交给 LLM 决策。"""
+        _, err = await self.request("llm_decision", enabled=bool(enabled))
         return err
 
     # ---- 桥暂时做不到的：明确报错，不假装成功 ----

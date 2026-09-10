@@ -383,6 +383,12 @@ class MinecraftPlugin(Star):
                     logger.error("连接女仆桥失败：%s", err)
                     return err
                 await self._sync_llm_tools(True)
+                if bool(self._cfg("llm_decision", True)):
+                    derr = await self.bot.set_llm_decision(True)
+                    if derr is None:
+                        logger.info("已开启 LLM 自主决策（女仆将询问下一步做什么）")
+                    else:
+                        logger.warning("开启 LLM 决策失败：%s", derr)
                 logger.info("已通过 bridge 驱动接管 AI 女仆")
                 return None
 
@@ -441,6 +447,8 @@ class MinecraftPlugin(Star):
         bot.set_callback("on_chat", self._on_mc_chat)
         bot.set_callback("on_disconnect", self._on_mc_disconnect)
         bot.set_callback("on_event", self._on_bot_event)
+        if hasattr(bot, "set_goal"):
+            bot.set_callback("on_decision", self._on_decision_needed)
 
     async def _on_bot_event(self, text: str) -> None:
         """女仆主动上报的事件（挖到了 / 受伤 / 饿了 / 到了）→ 转发给订阅者。"""
@@ -492,6 +500,51 @@ class MinecraftPlugin(Star):
         logger.warning("机器人断开：%s", reason)
         await self._sync_llm_tools(False)
         await self.bridge.broadcast(f"【MC】机器人已断开：{reason}")
+
+    async def _on_decision_needed(self, ev: dict) -> None:
+        """女仆问"下一步做什么" → 交给 LLM 决策，再下达目标。"""
+        try:
+            goals = ev.get("available_goals") or []
+            if not goals:
+                return
+            lines = [
+                f"- {g.get('id')}：{g.get('name')}（{g.get('description', '')}）"
+                for g in goals
+            ]
+            inv = "、".join(ev.get("inventory") or []) or "空"
+            done = "、".join(ev.get("completed") or []) or "无"
+            prompt = (
+                "你在玩 Minecraft 生存模式，需要决定下一件要做的事。\n"
+                f"位置：({ev.get('x')}, {ev.get('y')}, {ev.get('z')})，"
+                f"血量 {ev.get('health')}，饱食度 {ev.get('food')}\n"
+                f"背包：{inv}\n"
+                f"已完成：{done}\n\n"
+                "可选目标：\n" + "\n".join(lines) + "\n\n"
+                "请只输出一个目标 ID（英文，例如 GATHER_WOOD），不要输出别的文字。"
+            )
+            text = await self._llm_chat(prompt)
+            if not text:
+                return
+            ids = [g.get("id") for g in goals]
+            up = text.upper()
+            pick = next((gid for gid in ids if gid and gid in up), None)
+            if pick is None:
+                import re as _re
+                m = _re.search(r"[A-Z][A-Z_]{2,}", up)
+                if m and m.group(0) in ids:
+                    pick = m.group(0)
+            if not pick:
+                logger.debug("LLM 决策无法解析：%s", text[:120])
+                return
+            err = await self.bot.set_goal(pick)
+            name = next((g.get("name") for g in goals if g.get("id") == pick), pick)
+            if err is None:
+                logger.info("LLM 决策 → %s", pick)
+                await self.bridge.broadcast(f"【LLM 决策】下一步 → {name}")
+            else:
+                logger.warning("下达 LLM 目标失败：%s", err)
+        except Exception:  # noqa: BLE001
+            logger.exception("LLM 决策处理失败")
 
     async def _llm_chat(self, prompt: str, system_prompt: str | None = None) -> str | None:
         """统一 LLM 调用：优先使用 AstrBot 全局配置的模型和人格。"""
