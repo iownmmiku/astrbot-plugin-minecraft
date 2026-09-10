@@ -209,8 +209,8 @@ class AmbientIdleBehavior(Behavior):
     - 有节流：两次发言间隔不小于 min_gap 秒
     """
 
-    def __init__(self, *, min_gap: float = 180.0, llm_enabled: bool = True,
-                 trigger_probability: float = 0.25):
+    def __init__(self, *, min_gap: float = 60.0, llm_enabled: bool = True,
+                 trigger_probability: float = 0.5):
         super().__init__(name="ambient_idle", priority=10, check_interval=5.0)
         self.min_gap = min_gap
         self.llm_enabled = llm_enabled
@@ -499,11 +499,13 @@ class AmbientWanderBehavior(Behavior):
 
     会每隔一段随机时间，朝出生点附近随机方向走几步；用户命令（动作队列）优先，
     有任务执行时不会闲逛。
+    
+    增强版：大幅缩短间隔，提高活跃度，让机器人更像"活着的生物"。
     """
 
-    def __init__(self, *, radius: float = 10.0, min_interval: float = 120.0,
-                 max_interval: float = 300.0):
-        super().__init__(name="ambient_wander", priority=8, check_interval=10.0)
+    def __init__(self, *, radius: float = 10.0, min_interval: float = 30.0,
+                 max_interval: float = 90.0):
+        super().__init__(name="ambient_wander", priority=8, check_interval=5.0)
         self.radius = radius
         self.min_interval = min_interval
         self.max_interval = max_interval
@@ -519,7 +521,7 @@ class AmbientWanderBehavior(Behavior):
         gap = self._rng.uniform(self.min_interval, self.max_interval)
         if time.time() - self.last_wander < gap:
             return False
-        return self._rng.random() < 0.5
+        return self._rng.random() < 0.7  # 提高触发概率
 
     async def execute(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> str | None:
         if bot.position is None:
@@ -535,6 +537,193 @@ class AmbientWanderBehavior(Behavior):
         else:
             await bot.move_to(tx, tz, timeout=30.0)
         self.last_wander = time.time()
+        return None
+
+
+class LookAroundBehavior(Behavior):
+    """环境观察行为：随机转头看向不同方向，让机器人显得在观察周围。
+    
+    像真实玩家一样，偶尔转动视角、环顾四周，增强生命感。
+    """
+
+    def __init__(self, *, min_interval: float = 15.0, max_interval: float = 45.0):
+        super().__init__(name="look_around", priority=5, check_interval=3.0)
+        self.min_interval = min_interval
+        self.max_interval = max_interval
+        self.last_look = 0.0
+        self._rng = random.Random()
+
+    async def should_trigger(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> bool:
+        if not bot.connected:
+            return False
+        # 移动中不频繁转头
+        if bot.action_queue and bot.action_queue.get_current_task() is not None:
+            return False
+        gap = self._rng.uniform(self.min_interval, self.max_interval)
+        if time.time() - self.last_look < gap:
+            return False
+        return self._rng.random() < 0.6
+
+    async def execute(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> str | None:
+        # 随机生成视角
+        yaw = self._rng.uniform(0, 360)
+        # pitch: -90(仰望天空) 到 90(俯视地面)，偏向水平
+        pitch = self._rng.gauss(0, 25)  # 正态分布，大部分时间平视
+        pitch = max(-90, min(90, pitch))
+        
+        await bot.look_at(yaw, pitch)
+        logger.info("环顾四周：转向 (%.1f°, %.1f°)", yaw, pitch)
+        self.last_look = time.time()
+        return None
+
+
+class IdleChatterBehavior(Behavior):
+    """纯本地台词的闲聊行为：不依赖 LLM，用预设台词库。
+    
+    比 AmbientIdleBehavior 更频繁、更轻量，确保即使无 LLM 也能"说话"。
+    """
+
+    # 预设台词库：按时段和心情分类
+    CHATTER_LINES = {
+        "dawn": {
+            "high": [
+                "（伸懒腰）早上好呀～新的一天开始了！",
+                "（看向天边）太阳升起来了，真好看～",
+                "（蹦蹦跳跳）早晨的空气真清新！",
+            ],
+            "mid": [
+                "（打哈欠）早安...还有点困呢。",
+                "（揉揉眼睛）天亮了啊...",
+                "早上好。今天要做什么呢？",
+            ],
+            "low": [
+                "（无精打采）唔...又是新的一天...",
+                "早上...好冷清啊。",
+                "（小声）早安...",
+            ],
+        },
+        "day": {
+            "high": [
+                "（转圈圈）天气真好～",
+                "（哼着歌）啦啦啦～",
+                "（看看四周）这附近有什么有趣的吗？",
+                "感觉今天精神很好！",
+            ],
+            "mid": [
+                "（东张西望）嗯...在干什么好呢。",
+                "这里好安静啊。",
+                "（踢踢脚下的草）有点无聊...",
+            ],
+            "low": [
+                "（叹气）好久没人陪我玩了...",
+                "（低着头）一个人...好寂寞。",
+                "呜...主人在哪里呢...",
+            ],
+        },
+        "dusk": {
+            "high": [
+                "（看着晚霞）夕阳好漂亮～",
+                "傍晚了呢，时间过得真快！",
+                "（伸展四肢）活动了一天～",
+            ],
+            "mid": [
+                "天快黑了...该回去了吗？",
+                "（看向远方）夜晚快要来了。",
+                "黄昏的风...有点凉。",
+            ],
+            "low": [
+                "（抱住自己）天要黑了...有点害怕。",
+                "一个人的夜晚...好可怕。",
+                "主人...还会回来吗...",
+            ],
+        },
+        "night": {
+            "high": [
+                "（仰望星空）星星真多～",
+                "夜晚也不错呢，很安静。",
+                "（竖起耳朵）夜里的声音好清晰～",
+            ],
+            "mid": [
+                "夜深了...要休息吗？",
+                "（打哈欠）有点困了。",
+                "这么晚了，还没睡呢。",
+            ],
+            "low": [
+                "（瑟瑟发抖）好黑...好害怕...",
+                "呜呜...一个人的夜晚...",
+                "（小声哭泣）主人...我好孤单...",
+            ],
+        },
+    }
+
+    def __init__(self, *, min_interval: float = 60.0, max_interval: float = 150.0):
+        super().__init__(name="idle_chatter", priority=12, check_interval=10.0)
+        self.min_interval = min_interval
+        self.max_interval = max_interval
+        self.last_chatter = 0.0
+        self._rng = random.Random()
+
+    async def should_trigger(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> bool:
+        if not bot.connected:
+            return False
+        gap = self._rng.uniform(self.min_interval, self.max_interval)
+        if time.time() - self.last_chatter < gap:
+            return False
+        return self._rng.random() < 0.5
+
+    async def execute(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> str | None:
+        slot = time_slot()
+        mood_level = manager.mood.level
+        
+        # 从台词库中随机选择
+        lines = self.CHATTER_LINES.get(slot, {}).get(mood_level, [])
+        if not lines:
+            lines = ["（东张西望）嗯..."]
+        
+        text = self._rng.choice(lines)
+        await manager.speak(text)
+        self.last_chatter = time.time()
+        logger.info("闲聊台词：%s", text)
+        return None
+
+
+class IdleJumpBehavior(Behavior):
+    """空闲跳跃行为：偶尔原地跳一下，增加活力感。
+    
+    像真实玩家一样，没事跳一跳，让机器人显得有活力而不是呆站着。
+    """
+
+    def __init__(self, *, min_interval: float = 20.0, max_interval: float = 60.0):
+        super().__init__(name="idle_jump", priority=3, check_interval=5.0)
+        self.min_interval = min_interval
+        self.max_interval = max_interval
+        self.last_jump = 0.0
+        self._rng = random.Random()
+
+    async def should_trigger(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> bool:
+        if not bot.connected:
+            return False
+        # 移动中不跳
+        if bot.action_queue and bot.action_queue.get_current_task() is not None:
+            return False
+        gap = self._rng.uniform(self.min_interval, self.max_interval)
+        if time.time() - self.last_jump < gap:
+            return False
+        return self._rng.random() < 0.4
+
+    async def execute(self, bot: MCBot, manager: "AutonomousBehaviorManager") -> str | None:
+        # 原地跳跃：发送跳跃数据包
+        try:
+            # 跳跃次数：1-3次连跳
+            jumps = self._rng.randint(1, 3)
+            for _ in range(jumps):
+                await bot.jump()
+                await asyncio.sleep(0.5)
+            logger.info("空闲跳跃：跳了 %d 次", jumps)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("跳跃失败：%s", e)
+        
+        self.last_jump = time.time()
         return None
 
 
@@ -679,13 +868,27 @@ class AutonomousBehaviorManager:
         # 生动反应层
         if cfg.get("enable_idle_behaviors", True):
             self._behaviors.append(AmbientIdleBehavior(
-                min_gap=float(cfg.get("idle_broadcast_interval", 180)),
+                min_gap=float(cfg.get("idle_broadcast_interval", 60)),
                 llm_enabled=bool(cfg.get("idle_llm_generation", True)),
             ))
             self._behaviors.append(NearbyEntityReactionBehavior())
             self._behaviors.append(HurtReactionBehavior())
             self._behaviors.append(HungryReactionBehavior(threshold=max(1, min(20, int(cfg.get("idle_hungry_threshold", 6))))))
             self._behaviors.append(AmbientWanderBehavior())
+            
+            # 新增：环顾四周、纯本地闲聊、跳跃（增强生命感）
+            self._behaviors.append(LookAroundBehavior(
+                min_interval=float(cfg.get("look_around_min_interval", 15.0)),
+                max_interval=float(cfg.get("look_around_max_interval", 45.0)),
+            ))
+            self._behaviors.append(IdleChatterBehavior(
+                min_interval=float(cfg.get("chatter_min_interval", 60.0)),
+                max_interval=float(cfg.get("chatter_max_interval", 150.0)),
+            ))
+            self._behaviors.append(IdleJumpBehavior(
+                min_interval=float(cfg.get("jump_min_interval", 20.0)),
+                max_interval=float(cfg.get("jump_max_interval", 60.0)),
+            ))
             
             # Phase 3: 建造行为（空闲时建造）
             if cfg.get("enable_building_behaviors", True):
