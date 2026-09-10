@@ -263,10 +263,43 @@ class DecisionEngine:
     
     def __init__(self, llm_callback: Optional[callable] = None):
         self.llm_callback = llm_callback
+        # 导入所有目标类
+        from .survival_goals import (
+            CollectWoodGoal, CraftWoodenToolsGoal, MineStoneGoal as SurvivalMineStoneGoal,
+            CraftStoneToolsGoal, HuntForFoodGoal, MineIronGoal, CraftIronToolsGoal, MineDiamondsGoal
+        )
+        from .creative_goals import (
+            BuildStarterHomeGoal, BuildFarmGoal, DecorateHomeGoal,
+            ExploreNearbyGoal, FindVillageGoal
+        )
+        
+        # 注册所有可用目标（按优先级排序）
         self.available_goals: list[type[Goal]] = [
-            GatherWoodGoal,
-            MineStoneGoal,
-            BuildShelterGoal,
+            # 生存目标（高优先级，必须完成才能进步）
+            CollectWoodGoal,           # 优先级 100：采集初始木头
+            CraftWoodenToolsGoal,      # 优先级 95：制作木工具
+            SurvivalMineStoneGoal,     # 优先级 90：挖掘石头
+            CraftStoneToolsGoal,       # 优先级 85：制作石工具
+            HuntForFoodGoal,           # 优先级 80：狩猎食物
+            MineIronGoal,              # 优先级 75：挖掘铁矿
+            CraftIronToolsGoal,        # 优先级 70：制作铁工具
+            MineDiamondsGoal,          # 优先级 65：挖掘钻石
+            
+            # 建筑目标（中优先级，提升生活质量）
+            BuildStarterHomeGoal,      # 优先级 50：建造小屋
+            BuildFarmGoal,             # 优先级 45：建造农场
+            
+            # 探索目标（中等优先级，发现新资源）
+            ExploreNearbyGoal,         # 优先级 40：探索周围
+            FindVillageGoal,           # 优先级 35：寻找村庄
+            
+            # 装饰目标（低优先级，锦上添花）
+            DecorateHomeGoal,          # 优先级 30：装饰家园
+            
+            # 向后兼容的旧目标（最低优先级）
+            GatherWoodGoal,            # 优先级 80
+            MineStoneGoal,             # 优先级 70
+            BuildShelterGoal,          # 优先级 60
         ]
     
     async def select_next_goal(self, bot: MCBot, current_goal: Optional[Goal] = None) -> Optional[Goal]:

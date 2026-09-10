@@ -25,3 +25,88 @@ tags:
   - 聊天桥接
   - LLM工具
   - 机器人
+
+# 配置项定义
+configs:
+  - name: bot_username
+    type: string
+    default: AstrBot
+    desc: 机器人进服时的游戏内玩家名（离线账号）
+    
+  - name: server_host
+    type: string
+    default: localhost
+    desc: 服务器地址（留空使用本地服务器）
+    
+  - name: server_port
+    type: number
+    default: 25565
+    desc: 服务器端口
+    
+  - name: use_local_server
+    type: boolean
+    default: true
+    desc: 使用本地 Paper 服务器（自动下载/启动）
+    
+  - name: auto_reconnect
+    type: boolean
+    default: true
+    desc: 断线自动重连
+    
+  - name: use_astrbot_config
+    type: boolean
+    default: true
+    desc: 使用 AstrBot 全局配置（人格和模型）
+    
+  - name: use_astrbot_persona
+    type: boolean
+    default: true
+    desc: 使用 AstrBot 全局人格配置（禁用后使用下方的插件人格）
+    
+  - name: persona
+    type: select
+    default: ""
+    desc: 插件人格（仅当不使用 AstrBot 全局人格时生效）
+    options:
+      - value: ""
+        label: （使用 AstrBot 全局配置）
+      - value: maid
+        label: 女仆（礼貌温柔）
+      - value: tsundere
+        label: 傲娇（外冷内热）
+      - value: energetic
+        label: 元气（活泼开朗）
+      - value: calm
+        label: 冷静（理性分析）
+      - value: cheerful
+        label: 开朗（阳光积极）
+    
+  - name: llm_model
+    type: string
+    default: ""
+    desc: LLM 模型名称（留空使用 AstrBot 全局配置的默认模型）
+    
+  - name: persona_custom_desc
+    type: text
+    default: ""
+    desc: 自定义人格描述（高级选项，留空使用预设人格）
+    
+  - name: enable_goal_system
+    type: boolean
+    default: false
+    desc: 启用目标系统（让机器人自主游玩：砍树→挖矿→建造→探索）
+    
+  - name: enable_ambient_behaviors
+    type: boolean
+    default: true
+    desc: 启用环境行为（空闲时随机走动、说话、跳跃、四处张望）
+    
+  - name: launcher_api_enabled
+    type: boolean
+    default: false
+    desc: 启用启动器 API（与 AstrBot MC Launcher 集成）
+    
+  - name: launcher_api_url
+    type: string
+    default: http://localhost:25566
+    desc: 启动器 API 地址

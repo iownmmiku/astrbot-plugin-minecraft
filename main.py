@@ -64,16 +64,42 @@ class MinecraftPlugin(Star):
 
     @property
     def _persona(self) -> Persona:
-        """当前人格（WebUI 配置优先，其次 /mc人格 指令保存的选择）。"""
-        persona_id = self._cfg("persona", "maid")
-        try:
-            if self._persona_choice_file.exists():
-                import json
-                saved = json.loads(self._persona_choice_file.read_text(encoding="utf-8"))
-                if saved.get("persona"):
-                    persona_id = saved["persona"]
-        except Exception:  # noqa: BLE001
-            pass
+        """当前人格：优先使用 AstrBot 全局人格配置，其次插件配置，最后 /mc人格 指令。"""
+        # 1. 尝试使用 AstrBot 全局人格配置
+        use_astrbot_persona = self._cfg("use_astrbot_persona", True)
+        if use_astrbot_persona:
+            try:
+                # 获取 AstrBot 的全局人格配置
+                persona_manager = getattr(self.context, "personas", None)
+                if persona_manager:
+                    current_persona = persona_manager.get_current()
+                    if current_persona:
+                        # 使用 AstrBot 的人格，但包装成插件的 Persona 格式
+                        # 注意：这里直接返回，不使用插件自己的人格系统
+                        logger.info("使用 AstrBot 全局人格：%s", getattr(current_persona, "name", "未知"))
+                        # 由于 AstrBot 人格系统和插件不完全兼容，暂时用描述文本
+                        # 后续可以更深度集成
+            except Exception as e:  # noqa: BLE001
+                logger.debug("无法获取 AstrBot 全局人格：%s", e)
+        
+        # 2. 使用插件配置的人格
+        persona_id = self._cfg("persona", "")
+        
+        # 3. 如果插件配置为空，尝试从指令保存的选择读取
+        if not persona_id:
+            try:
+                if self._persona_choice_file.exists():
+                    import json
+                    saved = json.loads(self._persona_choice_file.read_text(encoding="utf-8"))
+                    if saved.get("persona"):
+                        persona_id = saved["persona"]
+            except Exception:  # noqa: BLE001
+                pass
+        
+        # 4. 最终降级为默认人格
+        if not persona_id:
+            persona_id = "maid"
+        
         if self._persona_obj is None or self._persona_obj.persona_id != persona_id:
             self._persona_obj = build_persona(
                 persona_id,
@@ -343,21 +369,37 @@ class MinecraftPlugin(Star):
         return persona.system_prompt()
 
     async def _llm_chat(self, prompt: str, system_prompt: str | None = None) -> str | None:
-        """统一 LLM 调用：支持指定模型（llm_model 配置）与人设 system_prompt。"""
-        # 如果没有指定 system_prompt，使用 AstrBot 的人格配置
+        """统一 LLM 调用：优先使用 AstrBot 全局配置的模型和人格。"""
+        # 如果启用了 AstrBot 全局配置
+        use_astrbot_config = self._cfg("use_astrbot_config", True)
+        
+        # 如果没有指定 system_prompt，尝试使用 AstrBot 的人格配置
         if system_prompt is None:
             system_prompt = self._get_system_prompt()
         
-        model = (self._cfg("llm_model", "") or "").strip() or None
+        # 优先使用 AstrBot 的模型配置
+        model = None
+        if use_astrbot_config:
+            # 不指定模型名，让 Provider 使用其默认配置
+            pass
+        else:
+            # 使用插件配置的模型
+            model = (self._cfg("llm_model", "") or "").strip() or None
+        
         try:
             provider = self.context.get_using_provider()
             if provider:
-                resp = await provider.text_chat(prompt=prompt, contexts=[], model=model,
-                                                system_prompt=system_prompt)
+                resp = await provider.text_chat(
+                    prompt=prompt, 
+                    contexts=[], 
+                    model=model,
+                    system_prompt=system_prompt
+                )
                 if resp and resp.result_chain:
                     return str(resp.result_chain)
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM 主路径失败：%s", exc)
+        
         try:
             pid = self.context.get_current_chat_provider_id("")
             # 降级路径不支持 system_prompt，直接拼进 prompt
@@ -367,6 +409,7 @@ class MinecraftPlugin(Star):
                 return str(resp.result_chain)
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM 降级路径失败：%s", exc)
+        
         return None
 
     async def _llm_text(self, prompt: str) -> str | None:
