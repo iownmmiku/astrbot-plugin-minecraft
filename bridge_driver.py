@@ -33,6 +33,8 @@ EVENT_LABEL = {
     "hurt": "受伤了",
     "heal": "恢复",
     "food": "饿了",
+    "build_complete": "施工完成",
+    "build_failed": "施工失败",
 }
 
 
@@ -222,6 +224,10 @@ class BridgeDriver:
             extra = f" {ev.get('delta')} → {ev.get('health')}"
         elif kind == "food":
             extra = f" 饱食度 {ev.get('food')}"
+        elif kind == "build_complete":
+            extra = f"：{ev.get('blocks')} 个方块"
+        elif kind == "build_failed":
+            extra = f"：{ev.get('reason')}"
         await cb(f"【{who}】{label}{block}{pos}{extra}")
 
     # ==================== 动作（与 MCBot 同形）====================

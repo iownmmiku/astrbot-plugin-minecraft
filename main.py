@@ -1485,3 +1485,70 @@ class MinecraftPlugin(Star):
         if r is None:
             return f"✓ 跳了一下，落地坐标 {self.bot.position}"
         return f"✗ 跳跃失败：{r}"
+
+    @filter.llm_tool(name="mc_build")
+    async def llm_mc_build(self, event: AstrMessageEvent, blueprint: str, origin_x: int, origin_y: int, origin_z: int):
+        """让 AI 女仆按蓝图施工（盖房子、修路、造农场等多方块建筑）。
+        
+        女仆会自动：
+        1. 检查背包材料是否足够（不够会报告缺什么）
+        2. 按"从下到上、从近到远"的顺序依次放置
+        3. 每放一块方块推送事件到订阅会话
+        4. 施工完成后推送 build_complete 事件
+        
+        使用前请确保：
+        - 女仆背包里有足够的材料（用 mc_give 提前给）
+        - 女仆在创造模式（或给她准备工具）
+        
+        执行后请用你的人格向用户汇报施工进度，例如：
+        - 开始时：描述即将建造的建筑、材料准备情况
+        - 施工中：可以评论建筑风格、施工进度
+        - 完成时：表达成就感、邀请用户来参观
+        
+        Args:
+            blueprint: 蓝图字符串，每行一个方块，格式 "x y z 方块ID"（相对坐标），
+                      例如：'0 0 0 stone\
+1 0 0 stone\
+0 1 0 stone'
+            origin_x: 蓝图原点的世界 X 坐标（绝对坐标）
+            origin_y: 蓝图原点的世界 Y 坐标（绝对坐标）
+            origin_z: 蓝图原点的世界 Z 坐标（绝对坐标）
+        """
+        err = self._require_bot()
+        if err:
+            return err
+        
+        # 解析蓝图
+        plan = []
+        for line in blueprint.strip().split("\
+"):
+            if not line.strip():
+                continue
+            parts = line.strip().split()
+            if len(parts) < 4:
+                return f"✗ 蓝图格式错误（行：{line}），应为 'x y z 方块ID'"
+            try:
+                rx, ry, rz = int(parts[0]), int(parts[1]), int(parts[2])
+                block = parts[3]
+                plan.append({
+                    "x": origin_x + rx,
+                    "y": origin_y + ry,
+                    "z": origin_z + rz,
+                    "block": block if ":" in block else f"minecraft:{block}"
+                })
+            except (ValueError, IndexError) as e:
+                return f"✗ 蓝图解析失败（行：{line}）：{e}"
+        
+        if not plan:
+            return "✗ 蓝图为空"
+        
+        # 发送 build 指令
+        if hasattr(self.bot, "request"):  # bridge 驱动
+            res, err = await self.bot.request("build", plan=plan, timeout=300)
+            if err:
+                return f"✗ 施工失败：{err}"
+            blocks = (res or {}).get("blocks", len(plan))
+            return f"✓ 开始施工，共 {blocks} 个方块（女仆会自动从下到上依次放置）"
+        else:
+            return "✗ protocol 驱动暂不支持 build 指令（请切换到 bridge 驱动）"
+
