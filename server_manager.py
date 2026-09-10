@@ -297,6 +297,38 @@ class LocalServerManager:
         """启动服务器；成功返回 None，失败返回错误信息。"""
         if self.process is not None and self.process.returncode is None:
             return None
+        
+        # 检查端口是否已被占用（检测孤儿进程）
+        import socket
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                result = s.connect_ex(('127.0.0.1', self.port))
+                if result == 0:
+                    # 端口已被占用
+                    self.log_cb(f"警告：端口 {self.port} 已被占用，可能是之前的服务器进程未正常关闭")
+                    # 尝试查找并显示占用进程信息
+                    try:
+                        import subprocess
+                        result = subprocess.run(
+                            ['netstat', '-ano'], 
+                            capture_output=True, 
+                            text=True, 
+                            timeout=5
+                        )
+                        for line in result.stdout.splitlines():
+                            if f':{self.port}' in line and 'LISTENING' in line:
+                                parts = line.split()
+                                if parts:
+                                    pid = parts[-1]
+                                    self.log_cb(f"端口被进程 PID={pid} 占用，请手动停止：taskkill /PID {pid} /F")
+                                break
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return f"端口 {self.port} 已被占用，无法启动服务器。请先停止占用该端口的进程。"
+        except Exception:  # noqa: BLE001
+            pass  # 检测失败不影响启动尝试
+        
         err = await self.ensure_downloaded()
         if err:
             return err

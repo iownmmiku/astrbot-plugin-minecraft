@@ -582,12 +582,29 @@ class MCBot:
 
         # 3. 登录态应答循环
         while True:
-            data_buf = await self._read_raw()
+            # 登录阶段读取：根据是否已启用压缩选择读取方式
+            if self._compression_enabled:
+                # 压缩已启用，需要解压
+                data = await conn.read_bytearray()
+                buf = Buffer(data)
+                data_length = buf.read_varint()
+                packet_data = buf.read(buf.remaining)
+                if data_length != 0:
+                    import zlib
+                    data_buf = Buffer(zlib.decompress(packet_data))
+                else:
+                    data_buf = Buffer(packet_data)
+            else:
+                # 压缩未启用，直接读取
+                data = await conn.read_bytearray()
+                data_buf = Buffer(data)
+            
             packet_id = data_buf.read_varint()
             if packet_id == 0x03:  # LoginSetCompression
                 self.compression_threshold = data_buf.read_varint()
                 self._compression_enabled = self.compression_threshold >= 0
                 logger.info("服务器启用压缩，阈值=%s", self.compression_threshold)
+                # 压缩启用后，后续包需要按压缩格式读取
             elif packet_id == 0x02:  # LoginSuccess
                 # mcproto 读取 uuid + username，剩余（properties）忽略
                 LoginSuccess.deserialize(data_buf)
@@ -606,7 +623,27 @@ class MCBot:
                 buf.write_varint(0x02)
                 buf.write_varint(message_id)
                 buf.write_value(StructFormat.BOOL, False)
-                await conn.write_bytearray(buf)
+                
+                # 发送响应：需要处理压缩
+                response_data = buf.flush()
+                if self._compression_enabled:
+                    # 手动构造压缩包
+                    import zlib
+                    # 判断是否需要压缩
+                    if len(response_data) >= self.compression_threshold:
+                        compressed = zlib.compress(response_data)
+                        final_buf = Buffer()
+                        final_buf.write_varint(len(response_data))  # 原始长度
+                        final_buf.write(compressed)
+                        await conn.write_bytearray(final_buf)
+                    else:
+                        # 小于阈值，不压缩
+                        final_buf = Buffer()
+                        final_buf.write_varint(0)  # data_length = 0 表示未压缩
+                        final_buf.write(response_data)
+                        await conn.write_bytearray(final_buf)
+                else:
+                    await conn.write_bytearray(buf)
             else:
                 logger.warning("登录态收到未知包 0x%02x，跳过", packet_id)
 
