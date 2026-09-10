@@ -41,6 +41,9 @@ PROTOCOL_VERSION = 763  # Minecraft 1.20.1
 CB_SPAWN_ENTITY = 0x01
 CB_NAMED_ENTITY_SPAWN = 0x03
 CB_BLOCK_CHANGE = 0x09
+CB_OPEN_WINDOW = 0x2F
+CB_WINDOW_ITEMS = 0x13
+CB_CLOSE_WINDOW = 0x12
 CB_MULTI_BLOCK_CHANGE = 0x3F
 CB_SET_CONTAINER_CONTENT = 0x11
 CB_SET_SLOT = 0x15
@@ -69,6 +72,8 @@ SB_TELEPORT_CONFIRM = 0x00
 SB_CHAT_MESSAGE = 0x05
 SB_CLIENT_COMMAND = 0x07
 SB_SETTINGS = 0x08
+SB_CLICK_WINDOW = 0x0D
+SB_CLOSE_WINDOW = 0x0E
 SB_KEEP_ALIVE = 0x12
 SB_POSITION = 0x14
 SB_POSITION_LOOK = 0x15
@@ -430,6 +435,62 @@ class SBTHeldItemSlot(PlayServerBoundPacket):
 
 @final
 @define
+class SBTClickWindow(PlayServerBoundPacket):
+    """Click Window (0x0D)：点击窗口槽位（合成、容器等）。"""
+    PACKET_ID = SB_CLICK_WINDOW
+
+    window_id: int
+    state_id: int
+    slot: int
+    button: int
+    mode: int
+    slots: list[tuple[int, dict[str, Any]]]  # [(slot_id, slot_data), ...]
+    carried_item: dict[str, Any] | None
+
+    def serialize_to(self, buf: Buffer) -> None:
+        buf.write_value(StructFormat.UBYTE, self.window_id)
+        buf.write_varint(self.state_id)
+        buf.write_value(StructFormat.SHORT, self.slot)
+        buf.write_value(StructFormat.BYTE, self.button)
+        buf.write_varint(self.mode)
+        
+        # 写入变化的槽位
+        buf.write_varint(len(self.slots))
+        for slot_id, slot_data in self.slots:
+            buf.write_value(StructFormat.SHORT, slot_id)
+            self._write_slot(buf, slot_data)
+        
+        # 写入鼠标拖动的物品
+        self._write_slot(buf, self.carried_item)
+
+    @staticmethod
+    def _write_slot(buf: Buffer, slot_data: dict[str, Any] | None) -> None:
+        """写入一个 Slot 数据。"""
+        if slot_data is None:
+            buf.write_value(StructFormat.BOOL, False)
+        else:
+            buf.write_value(StructFormat.BOOL, True)
+            buf.write_varint(slot_data["item_id"])
+            buf.write_value(StructFormat.BYTE, slot_data["count"])
+            # NBT/components（简化：写入原始 bytes）
+            nbt = slot_data.get("nbt", b"")
+            buf.write_bytearray(nbt if isinstance(nbt, bytes) else b"")
+
+
+@final
+@define
+class SBTCloseWindow(PlayServerBoundPacket):
+    """Close Window (0x0E)：关闭窗口。"""
+    PACKET_ID = SB_CLOSE_WINDOW
+
+    window_id: int
+
+    def serialize_to(self, buf: Buffer) -> None:
+        buf.write_value(StructFormat.UBYTE, self.window_id)
+
+
+@final
+@define
 class SBTBlockDig(PlayServerBoundPacket):
     """ServerBound Player Digging (1.20.1)：status / location(打包 position) / face / sequence"""
 
@@ -567,6 +628,11 @@ class MCBot:
         # 方块状态缓存（阶段 2）：(x,y,z) -> block_id，有限范围内的方块
         self.blocks: dict[tuple[int, int, int], int] = {}
         self.block_cache_radius = 32  # 缓存半径（格）
+        
+        # 窗口系统（阶段 4）
+        self.open_window_id: int | None = None
+        self.window_state_id = 0
+        self.window_items: dict[int, dict[str, Any]] = {}  # 当前打开窗口的物品
 
         self._callbacks: dict[str, Callable] = {}
         self._tasks: list[asyncio.Task] = []
@@ -806,6 +872,9 @@ class MCBot:
             CB_SPAWN_POSITION: self._on_spawn_position,
             CB_BLOCK_CHANGE: self._on_block_change,
             CB_MULTI_BLOCK_CHANGE: self._on_multi_block_change,
+            CB_OPEN_WINDOW: self._on_open_window,
+            CB_WINDOW_ITEMS: self._on_window_items,
+            CB_CLOSE_WINDOW: self._on_close_window,
         }
         handler = handlers.get(packet_id)
         if handler:
@@ -1042,6 +1111,46 @@ class MCBot:
             "z": z,
         }
         logger.debug("实体生成：%s (id=%d, type=%d)", entity_category, entity_id, entity_type_id)
+
+    async def _on_open_window(self, buf: Buffer) -> None:
+        """Open Window (0x2F)：服务器打开一个窗口（容器、工作台等）。"""
+        window_id = buf.read_varint()
+        window_type = buf.read_varint()
+        title = buf.read_utf()
+        
+        self.open_window_id = window_id
+        self.window_items.clear()
+        logger.info("打开窗口：ID=%d, 类型=%d, 标题=%s", window_id, window_type, title)
+
+    async def _on_window_items(self, buf: Buffer) -> None:
+        """Window Items (0x13)：窗口的完整物品列表。"""
+        window_id = buf.read_value(StructFormat.UBYTE)
+        state_id = buf.read_varint()
+        count = buf.read_varint()
+        
+        items = []
+        for _ in range(count):
+            slot_data = self._read_slot(buf)
+            items.append(slot_data)
+        
+        carried_item = self._read_slot(buf)
+        
+        # 更新窗口物品
+        if window_id == self.open_window_id:
+            self.window_state_id = state_id
+            self.window_items.clear()
+            for i, slot_data in enumerate(items):
+                if slot_data:
+                    self.window_items[i] = slot_data
+            logger.debug("窗口 %d 物品已更新：%d 个非空槽位", window_id, len(self.window_items))
+
+    async def _on_close_window(self, buf: Buffer) -> None:
+        """Close Window (0x12)：服务器关闭窗口。"""
+        window_id = buf.read_value(StructFormat.UBYTE)
+        if window_id == self.open_window_id:
+            self.open_window_id = None
+            self.window_items.clear()
+            logger.debug("窗口 %d 已关闭", window_id)
 
     async def _on_system_chat(self, buf: Buffer) -> None:
         content = buf.read_utf()
@@ -1568,6 +1677,57 @@ class MCBot:
         logger.warning("attack_entity 尚未实现完整的 UseEntity 包，只发送了挥手动画")
         
         return None
+
+    # ---------- 合成系统（阶段 4）----------
+    async def craft_item(
+        self,
+        recipe: list[tuple[int, int, int]],  # [(item_id, count, slot), ...]
+        output_slot: int = 0,
+        use_crafting_table: bool = False,
+        *,
+        timeout: float = 10.0,
+    ) -> str | None:
+        """在背包 2×2 或工作台 3×3 合成物品。成功返回 None，失败返回原因。
+        
+        Args:
+            recipe: 配方列表，每项为 (item_id, count, slot)
+                   - 背包合成：slot 0-3 对应 2×2 网格
+                   - 工作台合成：slot 0-8 对应 3×3 网格
+            output_slot: 输出槽位（背包合成=0，工作台合成=0）
+            use_crafting_table: 是否使用工作台（需要靠近并右键点击工作台方块）
+            timeout: 超时时间
+        
+        Returns:
+            成功返回 None，失败返回原因
+        
+        示例：
+            # 4个木板 -> 工作台（背包 2×2）
+            await bot.craft_item([(5, 1, 0), (5, 1, 1), (5, 1, 2), (5, 1, 3)], output_slot=0)
+        """
+        if not self.connected:
+            return "机器人未连接"
+        
+        # 简化实现：目前只支持背包 2×2 合成
+        if use_crafting_table:
+            return "工作台合成尚未实现（需要先右键点击工作台方块打开窗口）"
+        
+        # 检查材料
+        for item_id, count, slot in recipe:
+            if not self.has_item(item_id):
+                item_name = ITEM_NAMES.get(item_id, f"item_{item_id}")
+                return f"缺少材料：{item_name}"
+            if self.count_item(item_id) < count:
+                item_name = ITEM_NAMES.get(item_id, f"item_{item_id}")
+                return f"材料不足：{item_name}（需要 {count}，只有 {self.count_item(item_id)}）"
+        
+        # TODO: 实现完整的合成逻辑
+        # 1. 如果使用工作台，需要先右键点击工作台方块打开窗口
+        # 2. 将材料放入合成网格（ClickWindow 包）
+        # 3. 点击输出槽拾取产物
+        # 4. 关闭窗口
+        
+        logger.warning("craft_item 尚未实现完整的窗口交互逻辑")
+        return "合成功能开发中"
 
     @staticmethod
     def _face_toward(bx: float, by: float, bz: float, x: int, y: int, z: int) -> int:
