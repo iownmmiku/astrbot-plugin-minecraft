@@ -792,6 +792,7 @@ class MCBot:
         elif self.health > 0:
             self.lifecycle_state = "playing"
         await self._fire("on_health", self.health, self.food)
+    async def _on_keep_alive(self, buf: Buffer) -> None:
         keep_id = buf.read_value(StructFormat.LONGLONG)
         await self._send(SBTKeepAlive(keep_id))
 
@@ -821,12 +822,6 @@ class MCBot:
         self.position = (x, y, z)
         if teleport_id >= 0:
             await self._send(SBTTeleportConfirm(teleport_id))
-
-    async def _on_health(self, buf: Buffer) -> None:
-        self.health = buf.read_value(StructFormat.FLOAT)
-        self.food = buf.read_varint()
-        self.food_saturation = buf.read_value(StructFormat.FLOAT)
-        await self._fire("on_health", self.health, self.food)
 
     def _read_slot(self, buf: Buffer) -> dict[str, Any] | None:
         """读取一个物品槽位数据（Slot 类型）。
@@ -1388,6 +1383,9 @@ class MCBot:
             "pitch": round(self.pitch, 1),
             "health": self.health,
             "food": self.food,
+            "is_dead": self.is_dead,
+            "lifecycle_state": self.lifecycle_state,
+            "inventory": self.inventory,
             "players": sorted(self.players.values()),
         }
 
