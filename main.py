@@ -368,6 +368,24 @@ class MinecraftPlugin(Star):
     async def _connect_bot_locked(self) -> str | None:
         self._connecting = True
         try:
+            # 驱动二选一：bridge = 指挥服务端 mod 里的 AI 女仆；protocol = 自带协议客户端
+            if str(self._cfg("driver", "protocol")).lower() == "bridge":
+                from .bridge_driver import BridgeDriver
+
+                self.bot = BridgeDriver(
+                    str(self._cfg("bridge_host", "127.0.0.1")),
+                    int(self._cfg("bridge_port", 8124)),
+                    name=self._bot_username,
+                )
+                self._wire_bot(self.bot)
+                err = await self.bot.connect()
+                if err:
+                    logger.error("连接女仆桥失败：%s", err)
+                    return err
+                await self._sync_llm_tools(True)
+                logger.info("已通过 bridge 驱动接管 AI 女仆")
+                return None
+
             host, port = self._bot_target()
             # 准备行为配置（阶段 3 + 生动反应层）
             behavior_config = {
@@ -419,9 +437,14 @@ class MinecraftPlugin(Star):
         finally:
             self._connecting = False
 
-    def _wire_bot(self, bot: MCBot) -> None:
+    def _wire_bot(self, bot) -> None:
         bot.set_callback("on_chat", self._on_mc_chat)
         bot.set_callback("on_disconnect", self._on_mc_disconnect)
+        bot.set_callback("on_event", self._on_bot_event)
+
+    async def _on_bot_event(self, text: str) -> None:
+        """女仆主动上报的事件（挖到了 / 受伤 / 饿了 / 到了）→ 转发给订阅者。"""
+        await self.bridge.broadcast(f"【MC】{text}")
 
     # ---------- 回调 ----------
     async def _push_to_subscribers(self, umo: str, text: str) -> None:
@@ -1039,7 +1062,7 @@ class MinecraftPlugin(Star):
         Args:
             （无参数）
         """
-        yield event.plain_result(await self._status_text())
+        return (await self._status_text())
 
     @filter.llm_tool(name="mc_move")
     async def llm_mc_move(self, event: AstrMessageEvent, x: float, z: float):
@@ -1056,7 +1079,7 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         
         start_pos = self.bot.position
@@ -1074,7 +1097,7 @@ class MinecraftPlugin(Star):
             # 失败：提供详细错误信息
             result = f"✗ 移动失败：{r}。当前位置 {self.bot.position}"
         
-        yield event.plain_result(result)
+        return (result)
 
     @filter.llm_tool(name="mc_mine")
     async def llm_mc_mine(self, event: AstrMessageEvent, x: float, y: float, z: float):
@@ -1092,7 +1115,7 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         
         r = await self.bot.mine(int(x), int(y), int(z))
@@ -1106,7 +1129,7 @@ class MinecraftPlugin(Star):
         else:
             result = f"✗ 挖掘失败：{r}。目标 ({int(x)}, {int(y)}, {int(z)})"
         
-        yield event.plain_result(result)
+        return (result)
 
     @filter.llm_tool(name="mc_follow")
     async def llm_mc_follow(self, event: AstrMessageEvent, player: str):
@@ -1122,7 +1145,7 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         
         r = await self.bot.follow(player)
@@ -1136,7 +1159,7 @@ class MinecraftPlugin(Star):
                 online = ", ".join(self.bot.players.values())
                 result += f"。当前在线玩家：{online}"
         
-        yield event.plain_result(result)
+        return (result)
 
     @filter.llm_tool(name="mc_look")
     async def llm_mc_look(self, event: AstrMessageEvent, yaw: float, pitch: float):
@@ -1154,12 +1177,12 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         await self.bot.look_at(yaw, pitch)
         direction = "北" if yaw < 45 or yaw >= 315 else "东" if yaw < 135 else "南" if yaw < 225 else "西"
         angle_desc = "仰望天空" if pitch < -45 else "平视前方" if pitch < 45 else "俯视地面"
-        yield event.plain_result(f"✓ 已转向 {direction}方 ({yaw:.1f}°)，{angle_desc} ({pitch:.1f}°)")
+        return (f"✓ 已转向 {direction}方 ({yaw:.1f}°)，{angle_desc} ({pitch:.1f}°)")
 
     @filter.llm_tool(name="mc_chat")
     async def llm_mc_chat(self, event: AstrMessageEvent, message: str):
@@ -1175,13 +1198,13 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         ok = await self.bot.send_chat(message)
         if ok:
-            yield event.plain_result(f"✓ 已在游戏内说出：「{message}」")
+            return (f"✓ 已在游戏内说出：「{message}」")
         else:
-            yield event.plain_result(f"✗ 发送失败（消息为空或超过 256 字）")
+            return (f"✗ 发送失败（消息为空或超过 256 字）")
 
     @filter.llm_tool(name="mc_players")
     async def llm_mc_players(self, event: AstrMessageEvent):
@@ -1196,13 +1219,13 @@ class MinecraftPlugin(Star):
             （无参数）
         """
         if self.bot is None or not self.bot.connected:
-            yield event.plain_result("机器人未进服")
+            return ("机器人未进服")
             return
         names = self.bot.player_names()
         if names:
-            yield event.plain_result(f"✓ 当前在线 {len(names)} 位玩家：{' 、'.join(names)}")
+            return (f"✓ 当前在线 {len(names)} 位玩家：{' 、'.join(names)}")
         else:
-            yield event.plain_result("✓ 当前服务器无人（只有我自己）")
+            return ("✓ 当前服务器无人（只有我自己）")
 
     # ================= 异步动作队列 LLM 工具（阶段 1）=================
     @filter.llm_tool(name="mc_submit_move")
@@ -1220,13 +1243,13 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         if not self.bot.action_queue:
-            yield event.plain_result("✗ 动作队列未启用，请使用 mc_move 同步移动")
+            return ("✗ 动作队列未启用，请使用 mc_move 同步移动")
             return
         action_id = self.bot.action_queue.submit("move", {"x": x, "z": z})
-        yield event.plain_result(f"✓ 已提交移动动作到 ({x:.1f}, {z:.1f})，action_id: {action_id}")
+        return (f"✓ 已提交移动动作到 ({x:.1f}, {z:.1f})，action_id: {action_id}")
 
     @filter.llm_tool(name="mc_submit_mine")
     async def llm_mc_submit_mine(self, event: AstrMessageEvent, x: float, y: float, z: float):
@@ -1244,13 +1267,13 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         if not self.bot.action_queue:
-            yield event.plain_result("✗ 动作队列未启用，请使用 mc_mine 同步挖掘")
+            return ("✗ 动作队列未启用，请使用 mc_mine 同步挖掘")
             return
         action_id = self.bot.action_queue.submit("mine", {"x": int(x), "y": int(y), "z": int(z)})
-        yield event.plain_result(f"✓ 已提交挖掘动作到 ({int(x)}, {int(y)}, {int(z)})，action_id: {action_id}")
+        return (f"✓ 已提交挖掘动作到 ({int(x)}, {int(y)}, {int(z)})，action_id: {action_id}")
 
     @filter.llm_tool(name="mc_submit_follow")
     async def llm_mc_submit_follow(self, event: AstrMessageEvent, player: str):
@@ -1266,13 +1289,13 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         if not self.bot.action_queue:
-            yield event.plain_result("✗ 动作队列未启用，请使用 mc_follow 同步跟随")
+            return ("✗ 动作队列未启用，请使用 mc_follow 同步跟随")
             return
         action_id = self.bot.action_queue.submit("follow", {"player_name": player})
-        yield event.plain_result(f"✓ 已提交跟随玩家「{player}」的动作，action_id: {action_id}")
+        return (f"✓ 已提交跟随玩家「{player}」的动作，action_id: {action_id}")
 
     @filter.llm_tool(name="mc_action_status")
     async def llm_mc_action_status(self, event: AstrMessageEvent, action_id: str):
@@ -1289,14 +1312,14 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         if not self.bot.action_queue:
-            yield event.plain_result("✗ 动作队列未启用")
+            return ("✗ 动作队列未启用")
             return
         task = self.bot.action_queue.get_status(action_id)
         if task is None:
-            yield event.plain_result(f"✗ 未找到动作 {action_id}")
+            return (f"✗ 未找到动作 {action_id}")
             return
         status_text = f"动作 {action_id[:8]}... 状态: {task.status.value}"
         if task.status.value == "running":
@@ -1307,7 +1330,7 @@ class MinecraftPlugin(Star):
             status_text += f"，已完成（耗时 {duration:.1f} 秒）"
         elif task.status.value == "failed":
             status_text += f"，失败原因: {task.result}"
-        yield event.plain_result(status_text)
+        return (status_text)
 
     @filter.llm_tool(name="mc_cancel_action")
     async def llm_mc_cancel_action(self, event: AstrMessageEvent, action_id: str):
@@ -1323,16 +1346,16 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         if not self.bot.action_queue:
-            yield event.plain_result("✗ 动作队列未启用")
+            return ("✗ 动作队列未启用")
             return
         success = self.bot.action_queue.cancel(action_id)
         if success:
-            yield event.plain_result(f"✓ 已取消动作 {action_id[:8]}...（动作已从队列移除）")
+            return (f"✓ 已取消动作 {action_id[:8]}...（动作已从队列移除）")
         else:
-            yield event.plain_result(f"✗ 无法取消动作 {action_id[:8]}...（可能已在执行中或不存在）")
+            return (f"✗ 无法取消动作 {action_id[:8]}...（可能已在执行中或不存在）")
 
     # ================= 复合动作 LLM 工具（阶段 2）=================
     @filter.llm_tool(name="mc_move_and_mine")
@@ -1351,13 +1374,13 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         r = await self.bot.move_and_mine(int(x), int(y), int(z))
         if r is None:
-            yield event.plain_result(f"✓ 成功移动并挖掘方块 ({int(x)}, {int(y)}, {int(z)})")
+            return (f"✓ 成功移动并挖掘方块 ({int(x)}, {int(y)}, {int(z)})")
         else:
-            yield event.plain_result(f"✗ 移动挖掘失败：{r}")
+            return (f"✗ 移动挖掘失败：{r}")
 
     @filter.llm_tool(name="mc_collect_nearby")
     async def llm_mc_collect_nearby(
@@ -1379,16 +1402,16 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         r = await self.bot.collect_nearby_blocks(int(x), int(y), int(z), radius)
         if r is None:
             total_blocks = (2 * radius + 1) ** 2
-            yield event.plain_result(
+            return (
                 f"✓ 成功收集中心点 ({int(x)}, {int(y)}, {int(z)}) 半径 {radius} 格内的方块（约 {total_blocks} 个）"
             )
         else:
-            yield event.plain_result(f"✗ 收集失败或部分完成：{r}")
+            return (f"✗ 收集失败或部分完成：{r}")
 
     @filter.llm_tool(name="mc_patrol")
     async def llm_mc_patrol(
@@ -1410,16 +1433,16 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         r = await self.bot.patrol_area(x1, z1, x2, z2, loops=loops)
         if r is None:
             area_size = abs(x2 - x1) * abs(z2 - z1)
-            yield event.plain_result(
+            return (
                 f"✓ 完成 {loops} 圈巡逻，区域 ({x1:.1f}, {z1:.1f}) ↔ ({x2:.1f}, {z2:.1f})，面积约 {area_size:.0f} 平方格"
             )
         else:
-            yield event.plain_result(f"✗ 巡逻失败：{r}")
+            return (f"✗ 巡逻失败：{r}")
 
     @filter.llm_tool(name="mc_return_spawn")
     async def llm_mc_return_spawn(self, event: AstrMessageEvent):
@@ -1435,15 +1458,30 @@ class MinecraftPlugin(Star):
         """
         err = self._require_bot()
         if err:
-            yield event.plain_result(err)
+            return (err)
             return
         r = await self.bot.return_to_spawn()
         if r is None:
             spawn = self.bot.spawn_position
             if spawn:
-                yield event.plain_result(f"✓ 成功返回出生点 ({spawn[0]}, {spawn[1]}, {spawn[2]})")
+                return (f"✓ 成功返回出生点 ({spawn[0]}, {spawn[1]}, {spawn[2]})")
             else:
-                yield event.plain_result("✓ 成功返回出生点")
+                return ("✓ 成功返回出生点")
         else:
-            yield event.plain_result(f"✗ 返回出生点失败：{r}")
+            return (f"✗ 返回出生点失败：{r}")
 
+
+    @filter.llm_tool(name="mc_jump")
+    async def llm_mc_jump(self, event: AstrMessageEvent):
+        """让 Minecraft 机器人原地跳一下（越过 1 格高的台阶，或从卡住的地方脱困）。
+
+        Args:
+            （无参数）
+        """
+        err = self._require_bot()
+        if err:
+            return err
+        r = await self.bot.jump()
+        if r is None:
+            return f"✓ 跳了一下，落地坐标 {self.bot.position}"
+        return f"✗ 跳跃失败：{r}"
