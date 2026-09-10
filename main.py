@@ -170,7 +170,7 @@ class MinecraftPlugin(Star):
     async def _auto_start(self) -> None:
         try:
             # 根据模式启动服务器
-            if self._is_local and await self._ensure_server() is not None:
+            if self._cfg("enable_server", True) and self._cfg("auto_start_server", True) and self._is_local and await self._ensure_server() is not None:
                 err = await self.server.start()
                 if err:
                     logger.error("自动启动本地服务器失败：%s", err)
@@ -348,25 +348,35 @@ class MinecraftPlugin(Star):
 
     # ---------- LLM ----------
     def _get_system_prompt(self) -> str:
-        """获取 AstrBot 配置的人格 system_prompt。"""
-        # 优先使用 AstrBot 全局人格配置
-        try:
-            provider = self.context.get_using_provider()
-            if provider and hasattr(provider, 'personality'):
-                personality = provider.personality
-                if personality:
-                    return personality
-        except Exception:  # noqa: BLE001
-            pass
-        
-        # 降级使用插件配置的自定义人格描述
+        """按配置解析 AstrBot 人格或插件自定义人格。"""
+        source = self._cfg("persona_source", "default")
+        if source in ("default", "persona"):
+            try:
+                manager = getattr(self.context, "persona_manager", None)
+                if manager:
+                    selected = None
+                    if source == "persona":
+                        pid = self._cfg("astrbot_persona_id", "")
+                        if pid:
+                            selected = manager.get_persona(pid)
+                    else:
+                        selected = manager.get_default_persona_v3(None)
+                    if selected:
+                        prompt = getattr(selected, "system_prompt", None) or getattr(selected, "prompt", None)
+                        if prompt:
+                            return str(prompt)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("读取 AstrBot 人格失败：%s", exc)
         custom_desc = self._cfg("persona_custom_desc", "")
         if custom_desc:
             return custom_desc
-        
-        # 最终降级使用插件内置人格（但尽量让 LLM 使用 AstrBot 配置）
-        persona = self._persona
-        return persona.system_prompt()
+        return self._persona.system_prompt()
+
+    def _llm_model_override(self) -> str | None:
+        """返回插件独立模型覆盖；默认跟随 AstrBot 当前模型。"""
+        if self._cfg("model_source", "default") == "custom":
+            return (self._cfg("llm_model", "") or "").strip() or None
+        return None
 
     async def _llm_chat(self, prompt: str, system_prompt: str | None = None) -> str | None:
         """统一 LLM 调用：优先使用 AstrBot 全局配置的模型和人格。"""
@@ -378,13 +388,7 @@ class MinecraftPlugin(Star):
             system_prompt = self._get_system_prompt()
         
         # 优先使用 AstrBot 的模型配置
-        model = None
-        if use_astrbot_config:
-            # 不指定模型名，让 Provider 使用其默认配置
-            pass
-        else:
-            # 使用插件配置的模型
-            model = (self._cfg("llm_model", "") or "").strip() or None
+        model = self._llm_model_override()
         
         try:
             provider = self.context.get_using_provider()
